@@ -130,11 +130,6 @@ public class RickPrimeMod {
                 return;
             }
 
-            if (STATE.isDown) {
-                event.setCanceled(true);
-                return;
-            }
-
             float currentHealth = player.getHealth();
             float damage = event.getAmount();
 
@@ -154,10 +149,6 @@ public class RickPrimeMod {
                     loseNextBodyPart(player);
                 }
             } else {
-                // Si el golpe no es letal pero aún queremos que pierda extremidades progresivamente por golpes:
-                // O si prefieres que pierda extremidades conforme baja la vida:
-                // Vamos a hacer que cada golpe le quite una parte y ajuste la vida proporcionalmente o baje con normalidad.
-                // Dejemos que el daño baje la vida de forma normal y cada vez que reciba un golpe pierda una extremidad hasta llegar a 1 corazón.
                 if (STATE.partsLost < LOSS_ORDER.length) {
                     loseNextBodyPart(player);
                 }
