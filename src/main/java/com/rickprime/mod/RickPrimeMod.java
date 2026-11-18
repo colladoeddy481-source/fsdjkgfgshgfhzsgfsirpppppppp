@@ -14,6 +14,7 @@ import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
@@ -24,6 +25,7 @@ import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.InputEvent;
 import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
+import net.minecraftforge.client.event.RenderPlayerEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.living.LivingHurtEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
@@ -43,11 +45,6 @@ public class RickPrimeMod {
 
     // ================= Modelo de datos =================
 
-    /**
-     * Orden en el que se pierden las partes. Primero las piernas (para que el
-     * jugador se arrastre), luego los brazos. Si quieres otro orden, solo
-     * cambia este arreglo.
-     */
     public enum BodyPart {
         RIGHT_LEG, LEFT_LEG, RIGHT_ARM, LEFT_ARM
     }
@@ -56,16 +53,15 @@ public class RickPrimeMod {
             BodyPart.RIGHT_LEG, BodyPart.LEFT_LEG, BodyPart.RIGHT_ARM, BodyPart.LEFT_ARM
     };
 
-    /** Una extremidad caída en el mundo, puramente visual (no es una Entity de verdad). */
     private static class FallenLimb {
         final BodyPart part;
-        final Vec3 worldPos;      // posición donde cayó
-        final float yaw;          // rotación con la que quedó tirada
+        final Vec3 worldPos;
+        final float yaw;
         final ResourceLocation skin;
 
         boolean returning = false;
         int returnTick = 0;
-        static final int RETURN_DURATION = 20; // 1 segundo volando de regreso
+        static final int RETURN_DURATION = 20;
 
         FallenLimb(BodyPart part, Vec3 worldPos, float yaw, ResourceLocation skin) {
             this.part = part;
@@ -75,10 +71,9 @@ public class RickPrimeMod {
         }
     }
 
-    /** Estado de desmembramiento del jugador local. Cliente-only (igual que el mod original). */
     private static class BodyState {
-        int partsLost = 0;                 // 0..4, índice dentro de LOSS_ORDER
-        boolean isDown = false;             // true cuando ya perdió las 4 partes
+        int partsLost = 0;
+        boolean isDown = false;
         boolean regenerating = false;
         float originalMaxHealth = 20.0f;
         final List<FallenLimb> fallenLimbs = new ArrayList<>();
@@ -130,21 +125,43 @@ public class RickPrimeMod {
             Player player = Minecraft.getInstance().player;
             if (player == null || event.getEntity().getId() != player.getId()) return;
 
-            // Durante la regeneración el jugador es invulnerable.
             if (STATE.regenerating) {
                 event.setCanceled(true);
                 return;
             }
 
-            // Ya está completamente desmembrado: no puede morir, solo sigue tirado.
             if (STATE.isDown) {
                 event.setCanceled(true);
                 return;
             }
 
-            // Cada golpe: en vez de quitar vida, se pierde la siguiente parte del cuerpo.
-            event.setCanceled(true);
-            loseNextBodyPart(player);
+            float currentHealth = player.getHealth();
+            float damage = event.getAmount();
+
+            // Si el jugador ya perdió todas las partes, no puede morir, se queda bloqueado a 1 corazón (2.0f)
+            if (STATE.isDown) {
+                event.setCanceled(true);
+                player.setHealth(2.0f);
+                return;
+            }
+
+            // Permitimos que el daño baje la vida normalmente, pero si es letal o baja a 1 corazón o menos,
+            // lo detenemos exactamente en 1 corazón (2.0f) y pierde una extremidad.
+            if (currentHealth - damage <= 2.0f) {
+                event.setCanceled(true);
+                player.setHealth(2.0f);
+                if (STATE.partsLost < LOSS_ORDER.length) {
+                    loseNextBodyPart(player);
+                }
+            } else {
+                // Si el golpe no es letal pero aún queremos que pierda extremidades progresivamente por golpes:
+                // O si prefieres que pierda extremidades conforme baja la vida:
+                // Vamos a hacer que cada golpe le quite una parte y ajuste la vida proporcionalmente o baje con normalidad.
+                // Dejemos que el daño baje la vida de forma normal y cada vez que reciba un golpe pierda una extremidad hasta llegar a 1 corazón.
+                if (STATE.partsLost < LOSS_ORDER.length) {
+                    loseNextBodyPart(player);
+                }
+            }
         }
 
         private static void loseNextBodyPart(Player player) {
@@ -156,7 +173,6 @@ public class RickPrimeMod {
                     ? acp.getSkinTextureLocation()
                     : null;
 
-            // La extremidad cae un poco adelante/alrededor de donde está el jugador.
             Vec3 dropPos = player.position().add(
                     (player.getRandom().nextDouble() - 0.5) * 0.8,
                     0.1,
@@ -173,9 +189,8 @@ public class RickPrimeMod {
             player.displayClientMessage(Component.literal("§c[Rick Prime] ¡Perdiste " + partName + "!"), true);
 
             if (STATE.partsLost >= LOSS_ORDER.length) {
-                // Ya no le quedan extremidades: queda tirado, con 1 corazón, invulnerable.
                 STATE.isDown = true;
-                player.setHealth(1.0f);
+                player.setHealth(2.0f);
                 player.displayClientMessage(Component.literal(
                         "§4[Rick Prime] ¡Has quedado completamente desmembrado! Presiona 'R' para regenerarte."), true);
             }
@@ -191,7 +206,7 @@ public class RickPrimeMod {
 
             if (STATE.bothLegsMissing() || STATE.isDown) {
                 speed.addTransientModifier(CRAWL_SPEED_MOD);
-                player.setPose(Pose.SWIMMING); // reutiliza la animación de arrastre/nado horizontal
+                player.setPose(Pose.SWIMMING);
             } else if (STATE.missing(BodyPart.RIGHT_LEG) || STATE.missing(BodyPart.LEFT_LEG)) {
                 speed.addTransientModifier(LIMP_SPEED_MOD);
             }
@@ -227,7 +242,13 @@ public class RickPrimeMod {
         public static void onClientTick(TickEvent.ClientTickEvent event) {
             if (event.phase != TickEvent.Phase.END) return;
             Player player = Minecraft.getInstance().player;
-            if (player == null || !STATE.regenerating) return;
+            if (player == null) return;
+
+            if (STATE.bothLegsMissing() || STATE.isDown) {
+                player.setPose(Pose.SWIMMING);
+            }
+
+            if (!STATE.regenerating) return;
 
             boolean allHome = true;
             for (FallenLimb limb : STATE.fallenLimbs) {
@@ -239,8 +260,7 @@ public class RickPrimeMod {
                 }
             }
 
-            // Vida sube gradualmente hasta el máximo original mientras dura la regeneración.
-            float healPerTick = (STATE.originalMaxHealth - 1.0f) / FallenLimb.RETURN_DURATION;
+            float healPerTick = (STATE.originalMaxHealth - 2.0f) / FallenLimb.RETURN_DURATION;
             if (player.getHealth() < STATE.originalMaxHealth) {
                 player.setHealth(Math.min(STATE.originalMaxHealth, player.getHealth() + healPerTick));
             }
@@ -262,14 +282,60 @@ public class RickPrimeMod {
         }
     }
 
+    // ================= Ocultar extremidades perdidas del jugador =================
+
+    @Mod.EventBusSubscriber(modid = MODID, value = Dist.CLIENT)
+    public static class PlayerModelHider {
+
+        @SubscribeEvent
+        public static void onRenderPlayerPre(RenderPlayerEvent.Pre event) {
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+            if (STATE.partsLost == 0) return;
+
+            PlayerModel<AbstractClientPlayer> playerModel = event.getRenderer().getModel();
+
+            if (STATE.missing(BodyPart.RIGHT_LEG)) {
+                playerModel.rightLeg.visible = false;
+                playerModel.rightPants.visible = false;
+            }
+            if (STATE.missing(BodyPart.LEFT_LEG)) {
+                playerModel.leftLeg.visible = false;
+                playerModel.leftPants.visible = false;
+            }
+            if (STATE.missing(BodyPart.RIGHT_ARM)) {
+                playerModel.rightArm.visible = false;
+                playerModel.rightSleeve.visible = false;
+            }
+            if (STATE.missing(BodyPart.LEFT_ARM)) {
+                playerModel.leftArm.visible = false;
+                playerModel.leftSleeve.visible = false;
+            }
+        }
+
+        @SubscribeEvent
+        public static void onRenderPlayerPost(RenderPlayerEvent.Post event) {
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+
+            PlayerModel<AbstractClientPlayer> playerModel = event.getRenderer().getModel();
+            playerModel.rightLeg.visible = true;
+            playerModel.rightPants.visible = true;
+            playerModel.leftLeg.visible = true;
+            playerModel.leftPants.visible = true;
+            playerModel.rightArm.visible = true;
+            playerModel.rightSleeve.visible = true;
+            playerModel.leftArm.visible = true;
+            playerModel.leftSleeve.visible = true;
+        }
+    }
+
     // ================= Render de las extremidades caídas =================
 
     @Mod.EventBusSubscriber(modid = MODID, value = Dist.CLIENT)
     public static class LimbRenderer {
 
-        // Ajusta estos grados si al probarlo el miembro no queda bien tirado en el suelo.
         private static final float LIE_FLAT_X_ROT = 90f;
-
         private static PlayerModel<AbstractClientPlayer> model;
 
         @SubscribeEvent
@@ -304,14 +370,28 @@ public class RickPrimeMod {
                 case LEFT_ARM -> model.leftArm;
             };
 
+            ModelPart outerLayer = switch (limb.part) {
+                case RIGHT_LEG -> model.rightPants;
+                case LEFT_LEG -> model.leftPants;
+                case RIGHT_ARM -> model.rightSleeve;
+                case LEFT_ARM -> model.leftSleeve;
+            };
+
             model.head.visible = false;
             model.hat.visible = false;
             model.body.visible = false;
+            model.jacket.visible = false;
             model.rightArm.visible = false;
             model.leftArm.visible = false;
             model.rightLeg.visible = false;
             model.leftLeg.visible = false;
+            model.rightSleeve.visible = false;
+            model.leftSleeve.visible = false;
+            model.rightPants.visible = false;
+            model.leftPants.visible = false;
+
             target.visible = true;
+            outerLayer.visible = true;
 
             Vec3 pos = currentPosition(limb);
 
@@ -320,15 +400,15 @@ public class RickPrimeMod {
             poseStack.mulPose(Axis.YP.rotationDegrees(limb.yaw));
             poseStack.mulPose(Axis.XP.rotationDegrees(LIE_FLAT_X_ROT));
             poseStack.scale(-1.0f, -1.0f, 1.0f);
-            poseStack.translate(0, -1.5, 0); // sube el pivote a la altura aproximada de la cadera
+            poseStack.translate(0, -1.5, 0);
 
             var buffer = bufferSource.getBuffer(RenderType.entityCutoutNoCull(limb.skin));
             target.render(poseStack, buffer, 15728880, net.minecraft.client.renderer.texture.OverlayTexture.NO_OVERLAY);
+            outerLayer.render(poseStack, buffer, 15728880, net.minecraft.client.renderer.texture.OverlayTexture.NO_OVERLAY);
 
             poseStack.popPose();
         }
 
-        /** Durante el regreso, interpola linealmente desde donde cayó hasta donde debería estar en el jugador. */
         private static Vec3 currentPosition(FallenLimb limb) {
             if (!limb.returning) return limb.worldPos;
 
@@ -336,7 +416,7 @@ public class RickPrimeMod {
             if (player == null) return limb.worldPos;
 
             float t = Math.min(1.0f, limb.returnTick / (float) FallenLimb.RETURN_DURATION);
-            Vec3 target = player.position().add(0, 1.0, 0); // punto de reinserción aproximado (torso)
+            Vec3 target = player.position().add(0, 1.0, 0);
             return limb.worldPos.lerp(target, t);
         }
     }
