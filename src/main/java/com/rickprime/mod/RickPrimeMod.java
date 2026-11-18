@@ -14,7 +14,9 @@ import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
-import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.tags.DamageTypeTags;
+import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.damagesource.DamageTypes;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
@@ -23,6 +25,7 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.InputEvent;
+import net.minecraftforge.client.event.MovementInputUpdateEvent;
 import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
 import net.minecraftforge.client.event.RenderPlayerEvent;
@@ -55,18 +58,27 @@ public class RickPrimeMod {
 
     private static class FallenLimb {
         final BodyPart part;
-        final Vec3 worldPos;
-        final float yaw;
+        Vec3 worldPos;
+        Vec3 velocity;
+        float yaw;
+        float pitch;
+        float spinYaw;
+        float spinPitch;
         final ResourceLocation skin;
 
         boolean returning = false;
+        Vec3 returnStartPos;
         int returnTick = 0;
         static final int RETURN_DURATION = 20;
 
-        FallenLimb(BodyPart part, Vec3 worldPos, float yaw, ResourceLocation skin) {
+        FallenLimb(BodyPart part, Vec3 worldPos, Vec3 velocity, float yaw, ResourceLocation skin) {
             this.part = part;
             this.worldPos = worldPos;
+            this.velocity = velocity;
             this.yaw = yaw;
+            this.pitch = 90f;
+            this.spinYaw = 0f;
+            this.spinPitch = 0f;
             this.skin = skin;
         }
     }
@@ -74,6 +86,7 @@ public class RickPrimeMod {
     private static class BodyState {
         int partsLost = 0;
         boolean isDown = false;
+        boolean isImmobilized = false; // Inmovilizado tras explosión o caída de gran altura
         boolean regenerating = false;
         float originalMaxHealth = 20.0f;
         final List<FallenLimb> fallenLimbs = new ArrayList<>();
@@ -97,6 +110,8 @@ public class RickPrimeMod {
             new AttributeModifier(SPEED_MODIFIER_ID, "rickprime.crawl_speed", -0.85, AttributeModifier.Operation.MULTIPLY_TOTAL);
     private static final AttributeModifier LIMP_SPEED_MOD =
             new AttributeModifier(SPEED_MODIFIER_ID, "rickprime.limp_speed", -0.40, AttributeModifier.Operation.MULTIPLY_TOTAL);
+    private static final AttributeModifier IMMOBILE_SPEED_MOD =
+            new AttributeModifier(SPEED_MODIFIER_ID, "rickprime.immobile_speed", -1.0, AttributeModifier.Operation.MULTIPLY_TOTAL);
 
     // ================= Keybinding =================
 
@@ -130,63 +145,106 @@ public class RickPrimeMod {
                 return;
             }
 
-            float currentHealth = player.getHealth();
-            float damage = event.getAmount();
-
-            // Si el jugador ya perdió todas las partes, no puede morir, se queda bloqueado a 1 corazón (2.0f)
-            if (STATE.isDown) {
+            if (STATE.isDown || STATE.isImmobilized) {
                 event.setCanceled(true);
                 player.setHealth(2.0f);
                 return;
             }
 
-            // Permitimos que el daño baje la vida normalmente, pero si es letal o baja a 1 corazón o menos,
-            // lo detenemos exactamente en 1 corazón (2.0f) y pierde una extremidad.
+            DamageSource source = event.getSource();
+            float damage = event.getAmount();
+            float currentHealth = player.getHealth();
+
+            boolean isExplosion = source.is(DamageTypeTags.IS_EXPLOSION);
+            // Caída de gran altura: daño de caída de 8.0 o más (equivale a ~11 bloques o más de caída)
+            boolean isHighFall = (source.is(DamageTypes.FALL) || source.is(DamageTypeTags.IS_FALL)) && damage >= 8.0f;
+
+            if (isExplosion || isHighFall) {
+                event.setCanceled(true);
+                player.setHealth(2.0f);
+                shatterAllRemainingParts(player, isExplosion);
+                return;
+            }
+
+            // Daño normal (golpes, flechas, etc.)
             if (currentHealth - damage <= 2.0f) {
                 event.setCanceled(true);
                 player.setHealth(2.0f);
                 if (STATE.partsLost < LOSS_ORDER.length) {
-                    loseNextBodyPart(player);
+                    loseNextBodyPart(player, false);
                 }
             } else {
                 if (STATE.partsLost < LOSS_ORDER.length) {
-                    loseNextBodyPart(player);
+                    loseNextBodyPart(player, false);
                 }
             }
         }
 
-        private static void loseNextBodyPart(Player player) {
+        private static void shatterAllRemainingParts(Player player, boolean isExplosion) {
+            while (STATE.partsLost < LOSS_ORDER.length) {
+                loseNextBodyPart(player, true);
+            }
+            STATE.isDown = true;
+            STATE.isImmobilized = true;
+            player.setHealth(2.0f);
+            applyMovementPenalty(player);
+
+            String reason = isExplosion ? "¡Una explosión te ha hecho volar en pedazos!" : "¡La caída te ha destrozado!";
+            player.displayClientMessage(Component.literal(
+                    "§4[Rick Prime] " + reason + " Estás inmóvil. Presiona 'R' para regenerarte."), true);
+        }
+
+        private static void loseNextBodyPart(Player player, boolean flyingOut) {
             BodyPart lost = LOSS_ORDER[STATE.partsLost];
             STATE.partsLost++;
 
-            float yaw = player.getYRot() + (player.getRandom().nextFloat() * 60f - 30f);
+            float yaw = player.getYRot() + (player.getRandom().nextFloat() * 120f - 60f);
             ResourceLocation skin = player instanceof AbstractClientPlayer acp
                     ? acp.getSkinTextureLocation()
                     : null;
 
-            Vec3 dropPos = player.position().add(
-                    (player.getRandom().nextDouble() - 0.5) * 0.8,
-                    0.1,
-                    (player.getRandom().nextDouble() - 0.5) * 0.8
-            );
-            STATE.fallenLimbs.add(new FallenLimb(lost, dropPos, yaw, skin));
+            Vec3 spawnPos = player.position().add(0, 0.8, 0);
+            Vec3 velocity;
 
-            String partName = switch (lost) {
-                case RIGHT_LEG -> "la pierna derecha";
-                case LEFT_LEG -> "la pierna izquierda";
-                case RIGHT_ARM -> "el brazo derecho";
-                case LEFT_ARM -> "el brazo izquierdo";
-            };
-            player.displayClientMessage(Component.literal("§c[Rick Prime] ¡Perdiste " + partName + "!"), true);
-
-            if (STATE.partsLost >= LOSS_ORDER.length) {
-                STATE.isDown = true;
-                player.setHealth(2.0f);
-                player.displayClientMessage(Component.literal(
-                        "§4[Rick Prime] ¡Has quedado completamente desmembrado! Presiona 'R' para regenerarte."), true);
+            if (flyingOut) {
+                // Impulso fuerte hacia afuera y arriba para salir volando por explosión o caída fuerte
+                double angle = player.getRandom().nextDouble() * Math.PI * 2.0;
+                double horizontalSpeed = 0.45 + player.getRandom().nextDouble() * 0.45;
+                double verticalSpeed = 0.45 + player.getRandom().nextDouble() * 0.35;
+                velocity = new Vec3(Math.cos(angle) * horizontalSpeed, verticalSpeed, Math.sin(angle) * horizontalSpeed);
+            } else {
+                // Desprendimiento normal cerca del jugador
+                velocity = new Vec3(
+                        (player.getRandom().nextDouble() - 0.5) * 0.18,
+                        0.15,
+                        (player.getRandom().nextDouble() - 0.5) * 0.18
+                );
             }
 
-            applyMovementPenalty(player);
+            FallenLimb limb = new FallenLimb(lost, spawnPos, velocity, yaw, skin);
+            if (flyingOut) {
+                limb.spinYaw = (player.getRandom().nextFloat() - 0.5f) * 35f;
+                limb.spinPitch = (player.getRandom().nextFloat() - 0.5f) * 35f;
+            }
+            STATE.fallenLimbs.add(limb);
+
+            if (!flyingOut) {
+                String partName = switch (lost) {
+                    case RIGHT_LEG -> "la pierna derecha";
+                    case LEFT_LEG -> "la pierna izquierda";
+                    case RIGHT_ARM -> "el brazo derecho";
+                    case LEFT_ARM -> "el brazo izquierdo";
+                };
+                player.displayClientMessage(Component.literal("§c[Rick Prime] ¡Perdiste " + partName + "!"), true);
+
+                if (STATE.partsLost >= LOSS_ORDER.length) {
+                    STATE.isDown = true;
+                    player.setHealth(2.0f);
+                    player.displayClientMessage(Component.literal(
+                            "§4[Rick Prime] ¡Has quedado completamente desmembrado! Presiona 'R' para regenerarte."), true);
+                }
+                applyMovementPenalty(player);
+            }
         }
 
         private static void applyMovementPenalty(Player player) {
@@ -195,7 +253,10 @@ public class RickPrimeMod {
 
             speed.removeModifier(SPEED_MODIFIER_ID);
 
-            if (STATE.bothLegsMissing() || STATE.isDown) {
+            if (STATE.isImmobilized) {
+                speed.addTransientModifier(IMMOBILE_SPEED_MOD);
+                player.setPose(Pose.SWIMMING);
+            } else if (STATE.bothLegsMissing() || STATE.isDown) {
                 speed.addTransientModifier(CRAWL_SPEED_MOD);
                 player.setPose(Pose.SWIMMING);
             } else if (STATE.missing(BodyPart.RIGHT_LEG) || STATE.missing(BodyPart.LEFT_LEG)) {
@@ -206,6 +267,17 @@ public class RickPrimeMod {
         private static void clearMovementPenalty(Player player) {
             AttributeInstance speed = player.getAttribute(Attributes.MOVEMENT_SPEED);
             if (speed != null) speed.removeModifier(SPEED_MODIFIER_ID);
+        }
+
+        // Bloquea cualquier intento de caminar, saltar o agacharse mientras está inmóvil
+        @SubscribeEvent
+        public static void onMovementInput(MovementInputUpdateEvent event) {
+            if (STATE.isImmobilized && !STATE.regenerating) {
+                event.getInput().forwardImpulse = 0f;
+                event.getInput().leftImpulse = 0f;
+                event.getInput().jumping = false;
+                event.getInput().shiftKeyDown = false;
+            }
         }
 
         @SubscribeEvent
@@ -224,6 +296,7 @@ public class RickPrimeMod {
             STATE.regenerating = true;
             for (FallenLimb limb : STATE.fallenLimbs) {
                 limb.returning = true;
+                limb.returnStartPos = limb.worldPos;
                 limb.returnTick = 0;
             }
             player.displayClientMessage(Component.literal("§a[Rick Prime] ¡Regenerándote!"), true);
@@ -235,7 +308,30 @@ public class RickPrimeMod {
             Player player = Minecraft.getInstance().player;
             if (player == null) return;
 
-            if (STATE.bothLegsMissing() || STATE.isDown) {
+            // Física simple de vuelo y caída al suelo para las extremidades desprendidas
+            for (FallenLimb limb : STATE.fallenLimbs) {
+                if (!limb.returning) {
+                    double groundY = Math.floor(limb.worldPos.y) + 0.1;
+                    // Comprobar si hay bloque sólido debajo
+                    if (player.level().getBlockState(net.minecraft.core.BlockPos.containing(limb.worldPos.x, limb.worldPos.y - 0.12, limb.worldPos.z)).isAir()) {
+                        limb.velocity = limb.velocity.add(0, -0.05, 0); // Gravedad
+                        limb.worldPos = limb.worldPos.add(limb.velocity);
+                        limb.yaw += limb.spinYaw;
+                        limb.pitch += limb.spinPitch;
+                    } else {
+                        // Al tocar el suelo se detiene y queda acostada
+                        limb.velocity = Vec3.ZERO;
+                        limb.spinYaw = 0f;
+                        limb.spinPitch = 0f;
+                        limb.pitch = 90f;
+                    }
+                }
+            }
+
+            if (STATE.isImmobilized) {
+                player.setDeltaMovement(0, Math.min(0, player.getDeltaMovement().y), 0);
+                player.setPose(Pose.SWIMMING);
+            } else if (STATE.bothLegsMissing() || STATE.isDown) {
                 player.setPose(Pose.SWIMMING);
             }
 
@@ -264,6 +360,7 @@ public class RickPrimeMod {
         private static void finishRegeneration(Player player) {
             STATE.regenerating = false;
             STATE.isDown = false;
+            STATE.isImmobilized = false;
             STATE.partsLost = 0;
             STATE.fallenLimbs.clear();
             player.setHealth(STATE.originalMaxHealth);
@@ -326,7 +423,6 @@ public class RickPrimeMod {
     @Mod.EventBusSubscriber(modid = MODID, value = Dist.CLIENT)
     public static class LimbRenderer {
 
-        private static final float LIE_FLAT_X_ROT = 90f;
         private static PlayerModel<AbstractClientPlayer> model;
 
         @SubscribeEvent
@@ -389,7 +485,7 @@ public class RickPrimeMod {
             poseStack.pushPose();
             poseStack.translate(pos.x - camPos.x, pos.y - camPos.y, pos.z - camPos.z);
             poseStack.mulPose(Axis.YP.rotationDegrees(limb.yaw));
-            poseStack.mulPose(Axis.XP.rotationDegrees(LIE_FLAT_X_ROT));
+            poseStack.mulPose(Axis.XP.rotationDegrees(limb.pitch));
             poseStack.scale(-1.0f, -1.0f, 1.0f);
             poseStack.translate(0, -1.5, 0);
 
@@ -407,8 +503,9 @@ public class RickPrimeMod {
             if (player == null) return limb.worldPos;
 
             float t = Math.min(1.0f, limb.returnTick / (float) FallenLimb.RETURN_DURATION);
+            Vec3 start = limb.returnStartPos != null ? limb.returnStartPos : limb.worldPos;
             Vec3 target = player.position().add(0, 1.0, 0);
-            return limb.worldPos.lerp(target, t);
+            return start.lerp(target, t);
         }
     }
 }
