@@ -17,7 +17,7 @@ import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.entity.LivingEntityRenderer;
 import net.minecraft.client.renderer.entity.layers.ItemInHandLayer;
 import net.minecraft.client.renderer.entity.layers.RenderLayer;
-import net.minecraft.client.renderer.texture.OverlayTexture;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
@@ -66,7 +66,6 @@ import org.lwjgl.glfw.GLFW;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Random;
 import java.util.UUID;
@@ -113,25 +112,6 @@ public class RickPrimeMod {
         }
     }
 
-    private static class EvasionReplica {
-        Vec3 pos;
-        float yaw;
-        final int targetEntityId;
-        final ResourceLocation skin;
-        int ageTicks = 0;
-        boolean grabbed = false;
-        boolean executedKill = false;
-        static final int MAX_LIFETIME_TICKS = 35;
-        static final int GRAB_DURATION_TICKS = 10;
-
-        EvasionReplica(Vec3 pos, float yaw, int targetEntityId, ResourceLocation skin) {
-            this.pos = pos;
-            this.yaw = yaw;
-            this.targetEntityId = targetEntityId;
-            this.skin = skin;
-        }
-    }
-
     private static class BodyState {
         int partsLost = 0;
         float healthLostAccumulated = 0.0f;
@@ -142,7 +122,6 @@ public class RickPrimeMod {
         int orangeShieldCooldownTicks = 0;
         static final int SHIELD_IDLE_TIMEOUT_TICKS = 40;
         final List<FallenLimb> fallenLimbs = new ArrayList<>();
-        final List<EvasionReplica> activeReplicas = new ArrayList<>();
 
         // Evasión (teletransporte): barra que carga en 3 min, activa dura 2 min.
         int evasionChargeTicks = 0;
@@ -308,91 +287,6 @@ public class RickPrimeMod {
             return new Random().nextDouble() < chance;
         }
 
-        private static void spawnEvasionReplicaForTarget(Player player, Entity preferredAttacker) {
-            Entity target = preferredAttacker;
-            if (!(target instanceof LivingEntity livingTarget) || !livingTarget.isAlive() || target.getId() == player.getId()) {
-                List<LivingEntity> nearbyMobs = player.level().getEntitiesOfClass(
-                        LivingEntity.class,
-                        player.getBoundingBox().inflate(10.0),
-                        e -> e != null
-                                && e.isAlive()
-                                && e.getId() != player.getId()
-                                && !(e instanceof Player)
-                                && e instanceof Mob
-                );
-                nearbyMobs.sort(Comparator.comparingDouble(e -> e.distanceToSqr(player)));
-                target = nearbyMobs.isEmpty() ? null : nearbyMobs.get(0);
-            }
-
-            if (target == null) return;
-
-            ResourceLocation skin = player instanceof AbstractClientPlayer acp
-                    ? acp.getSkinTextureLocation()
-                    : null;
-            Vec3 spawnPos = player.position();
-            spawnTeleportParticles(player, spawnPos.x, spawnPos.y + 1.0, spawnPos.z);
-            STATE.activeReplicas.add(new EvasionReplica(spawnPos, player.getYRot(), target.getId(), skin));
-        }
-
-        private static void updateEvasionReplicas(Player clientPlayer) {
-            if (STATE.activeReplicas.isEmpty()) return;
-
-            Player realPlayer = resolveAuthoritative(clientPlayer);
-            List<EvasionReplica> toRemove = new ArrayList<>();
-
-            for (EvasionReplica replica : STATE.activeReplicas) {
-                replica.ageTicks++;
-
-                Entity clientEntity = clientPlayer.level().getEntity(replica.targetEntityId);
-                Entity serverEntity = realPlayer.level().getEntity(replica.targetEntityId);
-                Entity activeTarget = serverEntity != null ? serverEntity : clientEntity;
-
-                if (!(activeTarget instanceof LivingEntity living) || !living.isAlive()) {
-                    spawnTeleportParticles(clientPlayer, replica.pos.x, replica.pos.y + 1.0, replica.pos.z);
-                    toRemove.add(replica);
-                    continue;
-                }
-
-                Vec3 targetPos = living.position();
-                replica.pos = replica.pos.lerp(targetPos, 0.45);
-                double dx = targetPos.x - replica.pos.x;
-                double dz = targetPos.z - replica.pos.z;
-                if (dx * dx + dz * dz > 0.0001) {
-                    replica.yaw = (float) (Math.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0f;
-                }
-
-                if (replica.pos.distanceTo(targetPos) <= 1.35 || replica.ageTicks >= 5) {
-                    replica.grabbed = true;
-                    living.setDeltaMovement(Vec3.ZERO);
-                    living.teleportTo(replica.pos.x, replica.pos.y, replica.pos.z);
-                }
-
-                if (replica.grabbed && !replica.executedKill && replica.ageTicks >= EvasionReplica.GRAB_DURATION_TICKS) {
-                    replica.executedKill = true;
-                    DamageSource killSource = realPlayer.level().damageSources().playerAttack(realPlayer);
-                    if (serverEntity instanceof LivingEntity serverLiving && serverLiving.isAlive()) {
-                        serverLiving.hurt(killSource, 9999.0f);
-                        if (serverLiving.isAlive()) {
-                            serverLiving.kill();
-                        }
-                    }
-                    if (clientEntity instanceof LivingEntity clientLiving && clientLiving.isAlive()) {
-                        clientLiving.hurt(clientPlayer.level().damageSources().playerAttack(clientPlayer), 9999.0f);
-                    }
-                    spawnTeleportParticles(clientPlayer, targetPos.x, targetPos.y + 1.0, targetPos.z);
-                    toRemove.add(replica);
-                    continue;
-                }
-
-                if (replica.ageTicks >= EvasionReplica.MAX_LIFETIME_TICKS) {
-                    spawnTeleportParticles(clientPlayer, replica.pos.x, replica.pos.y + 1.0, replica.pos.z);
-                    toRemove.add(replica);
-                }
-            }
-
-            STATE.activeReplicas.removeAll(toRemove);
-        }
-
         @SubscribeEvent(priority = EventPriority.HIGHEST)
         public static void onLivingDeath(LivingDeathEvent event) {
             if (!isLocalPlayer(event.getEntity())) return;
@@ -427,7 +321,6 @@ public class RickPrimeMod {
             if (STATE.evasionActive) {
                 event.setCanceled(true);
                 performEvasionTeleport(player);
-                spawnEvasionReplicaForTarget(player, event.getSource().getEntity());
                 return;
             }
 
@@ -804,7 +697,6 @@ public class RickPrimeMod {
             spawnTeleportParticles(real, oldPos.x, oldPos.y + 1.0, oldPos.z);
             real.teleportTo(nx, ny, nz);
             spawnTeleportParticles(real, nx, ny + 1.0, nz);
-            spawnEvasionReplicaForTarget(clientPlayer, null);
 
             real.displayClientMessage(Component.literal("§b[Rick Prime] ¡Evasión!"), true);
         }
@@ -866,6 +758,46 @@ public class RickPrimeMod {
             player.displayClientMessage(Component.literal("§a[Rick Prime] ¡Regenerándote y recuperando extremidades!"), true);
         }
 
+        private static void updateFallenLimbPhysics(Player player, FallenLimb limb) {
+            if (limb.returning) return;
+
+            limb.velocity = limb.velocity.add(0.0, -0.05, 0.0);
+            double nextX = limb.worldPos.x + limb.velocity.x;
+            double nextY = limb.worldPos.y + limb.velocity.y;
+            double nextZ = limb.worldPos.z + limb.velocity.z;
+
+            BlockPos belowPos = BlockPos.containing(nextX, nextY - 0.12, nextZ);
+            boolean onGround = !player.level().getBlockState(belowPos).isAir() && limb.velocity.y <= 0.0;
+
+            if (onGround) {
+                if (limb.velocity.y < -0.18) {
+                    // Pequeño rebote al caer con fuerza
+                    limb.velocity = new Vec3(limb.velocity.x * 0.65, -limb.velocity.y * 0.35, limb.velocity.z * 0.65);
+                    limb.spinYaw *= 0.6f;
+                    limb.spinPitch *= 0.6f;
+                } else {
+                    // Fricción en el suelo hasta detenerse
+                    limb.velocity = new Vec3(limb.velocity.x * 0.78, 0.0, limb.velocity.z * 0.78);
+                    limb.spinYaw *= 0.5f;
+                    limb.spinPitch *= 0.5f;
+                    if (limb.velocity.horizontalDistanceSqr() < 0.0004) {
+                        limb.velocity = Vec3.ZERO;
+                        limb.spinYaw = 0f;
+                        limb.spinPitch = 0f;
+                    }
+                    limb.pitch += (90f - limb.pitch) * 0.35f;
+                }
+            }
+
+            limb.worldPos = new Vec3(
+                    limb.worldPos.x + limb.velocity.x,
+                    onGround && limb.velocity.y <= 0.0 ? limb.worldPos.y : limb.worldPos.y + limb.velocity.y,
+                    limb.worldPos.z + limb.velocity.z
+            );
+            limb.yaw += limb.spinYaw;
+            limb.pitch += limb.spinPitch;
+        }
+
         @SubscribeEvent
         public static void onClientTick(TickEvent.ClientTickEvent event) {
             if (event.phase != TickEvent.Phase.END) return;
@@ -873,8 +805,6 @@ public class RickPrimeMod {
             if (player == null) return;
 
             serverTickCounter++;
-
-            updateEvasionReplicas(player);
 
             if (STATE.evasionActive) {
                 STATE.evasionActiveTicksLeft--;
@@ -894,19 +824,7 @@ public class RickPrimeMod {
             }
 
             for (FallenLimb limb : STATE.fallenLimbs) {
-                if (!limb.returning) {
-                    if (player.level().getBlockState(net.minecraft.core.BlockPos.containing(limb.worldPos.x, limb.worldPos.y - 0.12, limb.worldPos.z)).isAir()) {
-                        limb.velocity = limb.velocity.add(0, -0.05, 0);
-                        limb.worldPos = limb.worldPos.add(limb.velocity);
-                        limb.yaw += limb.spinYaw;
-                        limb.pitch += limb.spinPitch;
-                    } else {
-                        limb.velocity = Vec3.ZERO;
-                        limb.spinYaw = 0f;
-                        limb.spinPitch = 0f;
-                        limb.pitch = 90f;
-                    }
-                }
+                updateFallenLimbPhysics(player, limb);
             }
 
             if (STATE.isImmobilized) {
@@ -1076,15 +994,9 @@ public class RickPrimeMod {
                 renderOrangeCircularShield(player, poseStack, bufferSource, camPos, event.getPartialTick());
             }
 
-            if (!STATE.fallenLimbs.isEmpty() || (player != null && !STATE.activeReplicas.isEmpty())) {
+            if (!STATE.fallenLimbs.isEmpty()) {
                 if (model == null) {
                     model = new PlayerModel<>(mc.getEntityModels().bakeLayer(ModelLayers.PLAYER), false);
-                }
-
-                if (player != null && !STATE.activeReplicas.isEmpty()) {
-                    for (EvasionReplica replica : STATE.activeReplicas) {
-                        renderEvasionReplica(replica, poseStack, bufferSource, camPos);
-                    }
                 }
 
                 for (FallenLimb limb : STATE.fallenLimbs) {
@@ -1094,43 +1006,6 @@ public class RickPrimeMod {
             }
 
             bufferSource.endBatch();
-        }
-
-        private static void renderEvasionReplica(EvasionReplica replica, PoseStack poseStack,
-                                                 MultiBufferSource.BufferSource bufferSource, Vec3 camPos) {
-            ResourceLocation tex = replica.skin != null
-                    ? replica.skin
-                    : new ResourceLocation("textures/entity/steve.png");
-
-            model.head.xRot = 0; model.head.yRot = 0; model.head.zRot = 0;
-            model.body.xRot = 0; model.body.yRot = 0; model.body.zRot = 0;
-            model.rightArm.xRot = replica.grabbed ? -1.4f : -0.6f;
-            model.rightArm.yRot = 0.2f;
-            model.rightArm.zRot = 0;
-            model.leftArm.xRot = replica.grabbed ? -1.4f : -0.6f;
-            model.leftArm.yRot = -0.2f;
-            model.leftArm.zRot = 0;
-            model.rightLeg.xRot = 0.35f;
-            model.rightLeg.yRot = 0;
-            model.rightLeg.zRot = 0;
-            model.leftLeg.xRot = -0.35f;
-            model.leftLeg.yRot = 0;
-            model.leftLeg.zRot = 0;
-
-            model.setAllVisible(true);
-
-            poseStack.pushPose();
-            poseStack.translate(replica.pos.x - camPos.x, replica.pos.y - camPos.y, replica.pos.z - camPos.z);
-            poseStack.mulPose(Axis.YP.rotationDegrees(180.0f - replica.yaw));
-            poseStack.scale(-1.0f, -1.0f, 1.0f);
-            poseStack.translate(0, -1.5, 0);
-
-            VertexConsumer consumer = bufferSource.getBuffer(RenderType.entityTranslucent(tex));
-            int celesteTint = 0xCC40E0FF;
-            model.renderToBuffer(poseStack, consumer, 15728880, OverlayTexture.NO_OVERLAY,
-                    0.25f, 0.85f, 1.0f, 0.78f);
-
-            poseStack.popPose();
         }
 
         private static void renderOrangeCircularShield(Player player, PoseStack poseStack,
