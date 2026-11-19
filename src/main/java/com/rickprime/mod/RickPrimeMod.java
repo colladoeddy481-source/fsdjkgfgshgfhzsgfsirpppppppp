@@ -12,6 +12,9 @@ import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
+import net.minecraft.client.renderer.entity.LivingEntityRenderer;
+import net.minecraft.client.renderer.entity.layers.ItemInHandLayer;
+import net.minecraft.client.renderer.entity.layers.RenderLayer;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.DamageTypeTags;
@@ -41,6 +44,7 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.lwjgl.glfw.GLFW;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -102,12 +106,20 @@ public class RickPrimeMod {
             return false;
         }
 
-        boolean bothLegsMissing() {
-            return missing(BodyPart.RIGHT_LEG) && missing(BodyPart.LEFT_LEG);
+        // True si la extremidad no está unida al cuerpo (está perdida o volando de regreso)
+        boolean armDetached(BodyPart arm) {
+            if (!missing(arm)) return false;
+            if (!regenerating) return true;
+            for (FallenLimb limb : fallenLimbs) {
+                if (limb.part == arm && limb.returning && limb.returnTick < FallenLimb.RETURN_DURATION) {
+                    return true;
+                }
+            }
+            return false;
         }
 
-        boolean isFullyRegenerated() {
-            return !regenerating && partsLost == 0;
+        boolean bothLegsMissing() {
+            return missing(BodyPart.RIGHT_LEG) && missing(BodyPart.LEFT_LEG);
         }
     }
 
@@ -182,111 +194,120 @@ public class RickPrimeMod {
             }
         }
 
-        // --- BLOQUEO DE MANOS Y COMER MIENTRAS FALTE EL BRAZO (ACTIVO HASTA REGENERAR AL 100%) ---
+        // --- BLOQUEO DE USO Y RENDER DE ÍTEMS SI EL BRAZO NO ESTÁ EN EL CUERPO ---
 
         @SubscribeEvent
         public static void onUseItemStart(LivingEntityUseItemEvent.Start event) {
-            if (STATE.isFullyRegenerated()) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
 
-            if (STATE.missing(BodyPart.RIGHT_ARM) || STATE.missing(BodyPart.LEFT_ARM)) {
+            HumanoidArm mainArm = localPlayer.getMainArm();
+            boolean usingRight = (event.getHand() == InteractionHand.MAIN_HAND && mainArm == HumanoidArm.RIGHT)
+                    || (event.getHand() == InteractionHand.OFF_HAND && mainArm == HumanoidArm.LEFT);
+
+            if (usingRight && STATE.armDetached(BodyPart.RIGHT_ARM)) {
+                event.setCanceled(true);
+            } else if (!usingRight && STATE.armDetached(BodyPart.LEFT_ARM)) {
                 event.setCanceled(true);
             }
         }
 
         @SubscribeEvent
         public static void onUseItemTick(LivingEntityUseItemEvent.Tick event) {
-            if (STATE.isFullyRegenerated()) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
 
-            if (STATE.missing(BodyPart.RIGHT_ARM) || STATE.missing(BodyPart.LEFT_ARM)) {
+            HumanoidArm mainArm = localPlayer.getMainArm();
+            boolean usingRight = (event.getHand() == InteractionHand.MAIN_HAND && mainArm == HumanoidArm.RIGHT)
+                    || (event.getHand() == InteractionHand.OFF_HAND && mainArm == HumanoidArm.LEFT);
+
+            if (usingRight && STATE.armDetached(BodyPart.RIGHT_ARM)) {
+                event.setCanceled(true);
+            } else if (!usingRight && STATE.armDetached(BodyPart.LEFT_ARM)) {
                 event.setCanceled(true);
             }
         }
 
         @SubscribeEvent
         public static void onRenderHand(RenderHandEvent event) {
-            if (STATE.isFullyRegenerated()) return;
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null) return;
 
-            boolean isRight = event.getHand() == InteractionHand.MAIN_HAND;
-            if (isRight && STATE.missing(BodyPart.RIGHT_ARM)) {
+            HumanoidArm mainArm = localPlayer.getMainArm();
+            boolean isRightHand = (event.getHand() == InteractionHand.MAIN_HAND && mainArm == HumanoidArm.RIGHT)
+                    || (event.getHand() == InteractionHand.OFF_HAND && mainArm == HumanoidArm.LEFT);
+
+            if (isRightHand && STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
-            } else if (!isRight && STATE.missing(BodyPart.LEFT_ARM)) {
+            } else if (!isRightHand && STATE.armDetached(BodyPart.LEFT_ARM)) {
                 event.setCanceled(true);
             }
         }
 
         @SubscribeEvent
         public static void onRightClickItem(PlayerInteractEvent.RightClickItem event) {
-            if (STATE.isFullyRegenerated()) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
 
-            if (event.getHand() == InteractionHand.MAIN_HAND && STATE.missing(BodyPart.RIGHT_ARM)) {
+            if (event.getHand() == InteractionHand.MAIN_HAND && STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
-                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Sin brazo derecho no puedes usar la mano principal!"), true);
-            } else if (event.getHand() == InteractionHand.OFF_HAND && STATE.missing(BodyPart.LEFT_ARM)) {
+                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Tu brazo derecho está en el suelo!"), true);
+            } else if (event.getHand() == InteractionHand.OFF_HAND && STATE.armDetached(BodyPart.LEFT_ARM)) {
                 event.setCanceled(true);
-                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Sin brazo izquierdo no puedes usar la mano secundaria!"), true);
+                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Tu brazo izquierdo está en el suelo!"), true);
             }
         }
 
         @SubscribeEvent
         public static void onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
-            if (STATE.isFullyRegenerated()) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
 
-            if (event.getHand() == InteractionHand.MAIN_HAND && STATE.missing(BodyPart.RIGHT_ARM)) {
+            if (event.getHand() == InteractionHand.MAIN_HAND && STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
-                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Sin brazo derecho no puedes interactuar ni colocar bloques!"), true);
-            } else if (event.getHand() == InteractionHand.OFF_HAND && STATE.missing(BodyPart.LEFT_ARM)) {
+                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Tu brazo derecho está en el suelo!"), true);
+            } else if (event.getHand() == InteractionHand.OFF_HAND && STATE.armDetached(BodyPart.LEFT_ARM)) {
                 event.setCanceled(true);
-                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Sin brazo izquierdo no puedes usar ese objeto!"), true);
+                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Tu brazo izquierdo está en el suelo!"), true);
             }
         }
 
         @SubscribeEvent
         public static void onLeftClickBlock(PlayerInteractEvent.LeftClickBlock event) {
-            if (STATE.isFullyRegenerated()) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
 
-            if (STATE.missing(BodyPart.RIGHT_ARM)) {
+            if (STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
             }
         }
 
         @SubscribeEvent
         public static void onAttackEntity(AttackEntityEvent event) {
-            if (STATE.isFullyRegenerated()) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
 
-            if (STATE.missing(BodyPart.RIGHT_ARM)) {
+            if (STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
-                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡No tienes brazo derecho para atacar!"), true);
+                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡No tienes el brazo derecho en tu cuerpo para atacar!"), true);
             }
         }
 
         @SubscribeEvent
         public static void onClickInput(InputEvent.InteractionKeyMappingTriggered event) {
-            if (STATE.isFullyRegenerated()) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null) return;
 
-            if (event.isAttack() && STATE.missing(BodyPart.RIGHT_ARM)) {
+            if (event.isAttack() && STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
                 event.setSwingHand(false);
             }
 
             if (event.isUseItem()) {
-                if (event.getHand() == InteractionHand.MAIN_HAND && STATE.missing(BodyPart.RIGHT_ARM)) {
+                if (event.getHand() == InteractionHand.MAIN_HAND && STATE.armDetached(BodyPart.RIGHT_ARM)) {
                     event.setCanceled(true);
                     event.setSwingHand(false);
-                } else if (event.getHand() == InteractionHand.OFF_HAND && STATE.missing(BodyPart.LEFT_ARM)) {
+                } else if (event.getHand() == InteractionHand.OFF_HAND && STATE.armDetached(BodyPart.LEFT_ARM)) {
                     event.setCanceled(true);
                     event.setSwingHand(false);
                 }
@@ -479,30 +500,71 @@ public class RickPrimeMod {
     @Mod.EventBusSubscriber(modid = MODID, value = Dist.CLIENT)
     public static class PlayerModelHider {
 
+        private static final List<RenderLayer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>>> removedItemLayers = new ArrayList<>();
+        private static Field layersField;
+
+        @SuppressWarnings("unchecked")
+        private static List<RenderLayer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>>> getLayersList(
+                LivingEntityRenderer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>> renderer) {
+            try {
+                if (layersField == null) {
+                    for (Field f : LivingEntityRenderer.class.getDeclaredFields()) {
+                        if (List.class.isAssignableFrom(f.getType())) {
+                            f.setAccessible(true);
+                            layersField = f;
+                            break;
+                        }
+                    }
+                }
+                if (layersField != null) {
+                    return (List<RenderLayer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>>>) layersField.get(renderer);
+                }
+            } catch (Exception ignored) {
+            }
+            return null;
+        }
+
         @SubscribeEvent
         public static void onRenderPlayerPre(RenderPlayerEvent.Pre event) {
-            if (STATE.isFullyRegenerated()) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
-            if (STATE.partsLost == 0) return;
 
             PlayerModel<AbstractClientPlayer> playerModel = event.getRenderer().getModel();
 
-            if (STATE.missing(BodyPart.RIGHT_LEG)) {
+            // Ocultar extremidades que aún no estén reintegradas al cuerpo
+            boolean rightLegOut = STATE.missing(BodyPart.RIGHT_LEG) && (!STATE.regenerating || isPartReturning(BodyPart.RIGHT_LEG));
+            boolean leftLegOut  = STATE.missing(BodyPart.LEFT_LEG)  && (!STATE.regenerating || isPartReturning(BodyPart.LEFT_LEG));
+            boolean rightArmOut = STATE.armDetached(BodyPart.RIGHT_ARM);
+            boolean leftArmOut  = STATE.armDetached(BodyPart.LEFT_ARM);
+
+            if (rightLegOut) {
                 playerModel.rightLeg.visible = false;
                 playerModel.rightPants.visible = false;
             }
-            if (STATE.missing(BodyPart.LEFT_LEG)) {
+            if (leftLegOut) {
                 playerModel.leftLeg.visible = false;
                 playerModel.leftPants.visible = false;
             }
-            if (STATE.missing(BodyPart.RIGHT_ARM)) {
+            if (rightArmOut) {
                 playerModel.rightArm.visible = false;
                 playerModel.rightSleeve.visible = false;
             }
-            if (STATE.missing(BodyPart.LEFT_ARM)) {
+            if (leftArmOut) {
                 playerModel.leftArm.visible = false;
                 playerModel.leftSleeve.visible = false;
+            }
+
+            // Si algún brazo está en el suelo (fuera del cuerpo), no renderizar el ítem en el cuerpo
+            if (rightArmOut || leftArmOut) {
+                List<RenderLayer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>>> layers = getLayersList(event.getRenderer());
+                if (layers != null && removedItemLayers.isEmpty()) {
+                    for (RenderLayer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>> layer : layers) {
+                        if (layer instanceof ItemInHandLayer) {
+                            removedItemLayers.add(layer);
+                        }
+                    }
+                    layers.removeAll(removedItemLayers);
+                }
             }
         }
 
@@ -510,6 +572,15 @@ public class RickPrimeMod {
         public static void onRenderPlayerPost(RenderPlayerEvent.Post event) {
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+
+            // Restaurar layers de ítems tras terminar este renderizado
+            if (!removedItemLayers.isEmpty()) {
+                List<RenderLayer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>>> layers = getLayersList(event.getRenderer());
+                if (layers != null) {
+                    layers.addAll(removedItemLayers);
+                }
+                removedItemLayers.clear();
+            }
 
             PlayerModel<AbstractClientPlayer> playerModel = event.getRenderer().getModel();
             playerModel.rightLeg.visible = true;
@@ -520,6 +591,15 @@ public class RickPrimeMod {
             playerModel.rightSleeve.visible = true;
             playerModel.leftArm.visible = true;
             playerModel.leftSleeve.visible = true;
+        }
+
+        private static boolean isPartReturning(BodyPart part) {
+            for (FallenLimb limb : STATE.fallenLimbs) {
+                if (limb.part == part) {
+                    return limb.returning && limb.returnTick < FallenLimb.RETURN_DURATION;
+                }
+            }
+            return false;
         }
     }
 
