@@ -32,6 +32,7 @@ import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.AbstractArrow;
+import net.minecraft.world.food.FoodData;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.phys.Vec3;
@@ -45,10 +46,12 @@ import net.minecraftforge.client.event.RenderPlayerEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.living.LivingAttackEvent;
 import net.minecraftforge.event.entity.living.LivingChangeTargetEvent;
+import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.entity.living.LivingEntityUseItemEvent;
 import net.minecraftforge.event.entity.living.LivingHurtEvent;
 import net.minecraftforge.event.entity.player.AttackEntityEvent;
 import net.minecraftforge.event.entity.player.PlayerInteractEvent;
+import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.joml.Matrix4f;
@@ -108,9 +111,7 @@ public class RickPrimeMod {
         boolean isDown = false;
         boolean isImmobilized = false;
         boolean regenerating = false;
-        float foodHealRemaining = 0.0f;
         float originalMaxHealth = 20.0f;
-        // Ticks restantes sin recibir flechas antes de desactivar el escudo circular naranja
         int orangeShieldCooldownTicks = 0;
         static final int SHIELD_IDLE_TIMEOUT_TICKS = 40;
         final List<FallenLimb> fallenLimbs = new ArrayList<>();
@@ -173,18 +174,30 @@ public class RickPrimeMod {
     @Mod.EventBusSubscriber(modid = MODID, value = Dist.CLIENT)
     public static class ForgeClientEvents {
 
+        private static boolean isLocalPlayer(LivingEntity entity) {
+            Player player = Minecraft.getInstance().player;
+            return player != null && entity.getId() == player.getId();
+        }
+
         private static boolean isArrowSource(DamageSource source) {
             return source.getDirectEntity() instanceof AbstractArrow || source.is(DamageTypeTags.IS_PROJECTILE);
         }
 
-        // Activa o mantiene activo el escudo mientras sigan llegando flechas;
-        // solo se desactiva cuando dejan de disparar durante SHIELD_IDLE_TIMEOUT_TICKS.
         private static void refreshOrangeShield(Player player) {
             boolean wasOff = STATE.orangeShieldCooldownTicks <= 0;
             STATE.orangeShieldCooldownTicks = BodyState.SHIELD_IDLE_TIMEOUT_TICKS;
             if (wasOff) {
                 player.displayClientMessage(Component.literal("§6[Rick Prime] ¡Escudo circular naranja activado!"), true);
             }
+        }
+
+        private static void clampPlayerToOneHeart(Player player) {
+            if (player.getHealth() < 2.0f) {
+                player.setHealth(2.0f);
+            }
+            player.setAbsorptionAmount(0.0f);
+            STATE.isDown = true;
+            applyMovementPenalty(player);
         }
 
         private static boolean shouldMobStopAttacking(Entity attacker, Player player) {
@@ -198,6 +211,18 @@ public class RickPrimeMod {
             long seed = ((long) attacker.getId() * 31L) ^ ((long) STATE.partsLost * 1315423911L);
             double roll = new Random(seed).nextDouble();
             return roll < chance;
+        }
+
+        @SubscribeEvent(priority = EventPriority.HIGHEST)
+        public static void onLivingDeath(LivingDeathEvent event) {
+            if (!isLocalPlayer(event.getEntity())) return;
+            Player player = Minecraft.getInstance().player;
+            if (player == null) return;
+
+            event.setCanceled(true);
+            clampPlayerToOneHeart(player);
+            player.displayClientMessage(Component.literal(
+                    "§4[Rick Prime] ¡Muerte evitada! Quedaste a 1 corazón. Presiona 'R' para regenerarte."), true);
         }
 
         @SubscribeEvent
@@ -214,13 +239,18 @@ public class RickPrimeMod {
 
         @SubscribeEvent
         public static void onLivingAttack(LivingAttackEvent event) {
+            if (!isLocalPlayer(event.getEntity())) return;
             Player player = Minecraft.getInstance().player;
             if (player == null) return;
-            if (event.getEntity().getId() != player.getId()) return;
 
             if (isArrowSource(event.getSource())) {
                 event.setCanceled(true);
                 refreshOrangeShield(player);
+                return;
+            }
+
+            if (STATE.regenerating) {
+                event.setCanceled(true);
                 return;
             }
 
@@ -230,10 +260,11 @@ public class RickPrimeMod {
             }
         }
 
-        @SubscribeEvent
+        @SubscribeEvent(priority = EventPriority.HIGHEST)
         public static void onPlayerHurt(LivingHurtEvent event) {
+            if (!isLocalPlayer(event.getEntity())) return;
             Player player = Minecraft.getInstance().player;
-            if (player == null || event.getEntity().getId() != player.getId()) return;
+            if (player == null) return;
 
             if (isArrowSource(event.getSource())) {
                 event.setCanceled(true);
@@ -255,12 +286,10 @@ public class RickPrimeMod {
                 return;
             }
 
-            if (STATE.isDown || (currentHealth <= 2.0f && currentAbsorption <= 0.0f)) {
+            // Si ya está abatido o en 1 corazón (2.0f) o menos sin absorción, nunca baja más ni muere
+            if (STATE.isDown || currentHealth <= 2.0f || (currentHealth <= 2.0f && currentAbsorption <= 0.0f)) {
                 event.setCanceled(true);
-                player.setHealth(2.0f);
-                player.setAbsorptionAmount(0.0f);
-                STATE.isDown = true;
-                applyMovementPenalty(player);
+                clampPlayerToOneHeart(player);
                 return;
             }
 
@@ -335,22 +364,30 @@ public class RickPrimeMod {
             processLostHealthLimbs(player, damage, false);
         }
 
+        // Las comidas aumentan la barra de comida y saturación, pero NO curan vida ni traen extremidades
         @SubscribeEvent
         public static void onUseItemFinish(LivingEntityUseItemEvent.Finish event) {
+            if (!isLocalPlayer(event.getEntity())) return;
             Player localPlayer = Minecraft.getInstance().player;
-            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+            if (localPlayer == null) return;
 
             ItemStack stack = event.getItem();
-            if (!stack.isEdible()) return;
+            if (!stack.isEdible() || stack.getFoodProperties(localPlayer) == null) return;
 
-            float healAmount = 4.0f;
-            if (stack.is(Items.ENCHANTED_GOLDEN_APPLE)) {
-                healAmount = 14.0f;
-            } else if (stack.is(Items.GOLDEN_APPLE)) {
-                healAmount = 6.0f;
+            var foodProps = stack.getFoodProperties(localPlayer);
+            FoodData foodData = localPlayer.getFoodData();
+
+            int bonusNutrition = foodProps.getNutrition();
+            float bonusSaturation = foodProps.getSaturationModifier();
+
+            if (stack.is(Items.ENCHANTED_GOLDEN_APPLE) || stack.is(Items.GOLDEN_APPLE)) {
+                bonusNutrition += 4;
+                bonusSaturation += 0.6f;
             }
 
-            STATE.foodHealRemaining = Math.min(20.0f, STATE.foodHealRemaining + healAmount);
+            foodData.eat(bonusNutrition, bonusSaturation);
+            localPlayer.displayClientMessage(Component.literal(
+                    "§e[Rick Prime] Barra de comida aumentada (sin regenerar vida ni extremidades)."), true);
         }
 
         private static void launchLimbsCount(Player player, int count, boolean flyingOut) {
@@ -381,8 +418,9 @@ public class RickPrimeMod {
 
         @SubscribeEvent
         public static void onUseItemStart(LivingEntityUseItemEvent.Start event) {
+            if (!isLocalPlayer(event.getEntity())) return;
             Player localPlayer = Minecraft.getInstance().player;
-            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+            if (localPlayer == null) return;
 
             if (shouldCancelUseItem(localPlayer, localPlayer.getUsedItemHand())) {
                 event.setCanceled(true);
@@ -391,8 +429,9 @@ public class RickPrimeMod {
 
         @SubscribeEvent
         public static void onUseItemTick(LivingEntityUseItemEvent.Tick event) {
+            if (!isLocalPlayer(event.getEntity())) return;
             Player localPlayer = Minecraft.getInstance().player;
-            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+            if (localPlayer == null) return;
 
             if (shouldCancelUseItem(localPlayer, localPlayer.getUsedItemHand())) {
                 event.setCanceled(true);
@@ -417,8 +456,9 @@ public class RickPrimeMod {
 
         @SubscribeEvent
         public static void onRightClickItem(PlayerInteractEvent.RightClickItem event) {
+            if (!isLocalPlayer(event.getEntity())) return;
             Player localPlayer = Minecraft.getInstance().player;
-            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+            if (localPlayer == null) return;
 
             if (event.getHand() == InteractionHand.MAIN_HAND && STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
@@ -431,8 +471,9 @@ public class RickPrimeMod {
 
         @SubscribeEvent
         public static void onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
+            if (!isLocalPlayer(event.getEntity())) return;
             Player localPlayer = Minecraft.getInstance().player;
-            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+            if (localPlayer == null) return;
 
             if (event.getHand() == InteractionHand.MAIN_HAND && STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
@@ -445,9 +486,7 @@ public class RickPrimeMod {
 
         @SubscribeEvent
         public static void onLeftClickBlock(PlayerInteractEvent.LeftClickBlock event) {
-            Player localPlayer = Minecraft.getInstance().player;
-            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
-
+            if (!isLocalPlayer(event.getEntity())) return;
             if (STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
             }
@@ -455,8 +494,9 @@ public class RickPrimeMod {
 
         @SubscribeEvent
         public static void onAttackEntity(AttackEntityEvent event) {
+            if (!isLocalPlayer(event.getEntity())) return;
             Player localPlayer = Minecraft.getInstance().player;
-            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+            if (localPlayer == null) return;
 
             if (STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
@@ -575,7 +615,6 @@ public class RickPrimeMod {
 
         private static void startRegeneration(Player player) {
             STATE.regenerating = true;
-            STATE.foodHealRemaining = 0.0f;
             for (FallenLimb limb : STATE.fallenLimbs) {
                 limb.returning = true;
                 limb.returnStartPos = limb.worldPos;
@@ -597,12 +636,9 @@ public class RickPrimeMod {
                 }
             }
 
-            if (STATE.foodHealRemaining > 0.0f && !STATE.regenerating) {
-                float step = Math.min(STATE.foodHealRemaining, 0.4f);
-                if (player.getHealth() < STATE.originalMaxHealth) {
-                    player.setHealth(Math.min(STATE.originalMaxHealth, player.getHealth() + step));
-                }
-                STATE.foodHealRemaining = Math.max(0.0f, STATE.foodHealRemaining - step);
+            // Salvaguarda continua: nunca permite que baje de 1 corazón (2.0f) fuera de regeneración
+            if (!STATE.regenerating && (STATE.isDown || player.getHealth() < 2.0f)) {
+                clampPlayerToOneHeart(player);
             }
 
             for (FallenLimb limb : STATE.fallenLimbs) {
@@ -656,7 +692,6 @@ public class RickPrimeMod {
             STATE.isImmobilized = false;
             STATE.partsLost = 0;
             STATE.healthLostAccumulated = 0.0f;
-            STATE.foodHealRemaining = 0.0f;
             STATE.fallenLimbs.clear();
             player.setHealth(STATE.originalMaxHealth);
             player.setPose(Pose.STANDING);
