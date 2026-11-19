@@ -39,7 +39,6 @@ import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.food.FoodData;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.InputEvent;
@@ -365,14 +364,24 @@ public class RickPrimeMod {
 
             float currentHealth = player.getHealth();
             float currentAbsorption = player.getAbsorptionAmount();
-            float totalPool = currentHealth + currentAbsorption;
             float damage = event.getAmount();
 
             if (damage <= 0.0f) {
                 return;
             }
 
-            if (STATE.isDown || currentHealth <= 2.0f || (currentHealth <= 2.0f && currentAbsorption <= 0.0f)) {
+            // Primero se consume la vida amarilla (absorción); solo el daño sobrante
+            // afecta la vida normal de 10 corazones y cuenta para perder extremidades.
+            float absorbedDamage = Math.min(currentAbsorption, damage);
+            float effectiveDamage = Math.max(0.0f, damage - absorbedDamage);
+
+            if (effectiveDamage <= 0.0f) {
+                return;
+            }
+
+            float totalPool = currentHealth;
+
+            if (STATE.isDown || currentHealth <= 2.0f) {
                 event.setCanceled(true);
                 clampPlayerToOneHeart(player);
                 return;
@@ -383,7 +392,7 @@ public class RickPrimeMod {
             boolean isFall = source.is(DamageTypes.FALL) || source.is(DamageTypeTags.IS_FALL);
 
             float maxAbsorbableBeforeFloor = Math.max(0.0f, totalPool - 2.0f);
-            float actualTotalLost = Math.min(damage, maxAbsorbableBeforeFloor);
+            float actualTotalLost = Math.min(effectiveDamage, maxAbsorbableBeforeFloor);
 
             if (isExplosion) {
                 float heartsLost = actualTotalLost / 2.0f;
@@ -396,7 +405,7 @@ public class RickPrimeMod {
                     limbsToLaunch = Math.min(LOSS_ORDER.length - STATE.partsLost, (int) Math.floor(heartsLost / 2.0f));
                 }
 
-                if (totalPool - damage <= 2.0f) {
+                if (totalPool - effectiveDamage <= 2.0f) {
                     event.setCanceled(true);
                     player.setAbsorptionAmount(0.0f);
                     player.setHealth(2.0f);
@@ -422,11 +431,11 @@ public class RickPrimeMod {
                 return;
             }
 
-            if (isFall && (damage >= 18.0f || totalPool - damage <= 2.0f)) {
+            if (isFall && (effectiveDamage >= 18.0f || totalPool - effectiveDamage <= 2.0f)) {
                 event.setCanceled(true);
                 player.setAbsorptionAmount(0.0f);
                 player.setHealth(2.0f);
-                processLostHealthLimbs(player, actualTotalLost, damage >= 18.0f);
+                processLostHealthLimbs(player, actualTotalLost, effectiveDamage >= 18.0f);
                 STATE.isDown = true;
                 applyMovementPenalty(player);
                 player.displayClientMessage(Component.literal(
@@ -434,7 +443,7 @@ public class RickPrimeMod {
                 return;
             }
 
-            if (totalPool - damage <= 2.0f) {
+            if (totalPool - effectiveDamage <= 2.0f) {
                 event.setCanceled(true);
                 player.setAbsorptionAmount(0.0f);
                 player.setHealth(2.0f);
@@ -446,7 +455,7 @@ public class RickPrimeMod {
                 return;
             }
 
-            processLostHealthLimbs(player, damage, false);
+            processLostHealthLimbs(player, effectiveDamage, false);
         }
 
         @SubscribeEvent
@@ -692,7 +701,6 @@ public class RickPrimeMod {
         }
 
         private static void spawnTeleportParticles(Player player, double x, double y, double z) {
-            // Estela/destello celeste, sin clon: solo un estallido de partículas en el punto de salida y de llegada.
             if (player.level() instanceof ServerLevel serverLevel) {
                 serverLevel.sendParticles(ParticleTypes.END_ROD, x, y, z, 30, 0.3, 0.6, 0.3, 0.02);
             } else {
@@ -734,9 +742,7 @@ public class RickPrimeMod {
                     STATE.evasionActiveTicksLeft = EVASION_DURATION_TICKS;
                     STATE.evasionChargeTicks = 0;
                     player.displayClientMessage(Component.literal(
-                            "§b[Rick Prime] ¡Evasión activada! Esquivarás ataques por 2 minutos."), true);
-                } else if (!STATE.evasionActive) {
-                    player.displayClientMessage(Component.literal("§7[Rick Prime] La evasión aún no está cargada."), true);
+                            "§b[Rick Prime] ¡Evasión activada! Esquivarás ataques teletransportándote."), true);
                 }
             }
         }
@@ -757,28 +763,24 @@ public class RickPrimeMod {
             Player player = Minecraft.getInstance().player;
             if (player == null) return;
 
+            serverTickCounter++;
+
+            if (STATE.evasionActive) {
+                STATE.evasionActiveTicksLeft--;
+                if (STATE.evasionActiveTicksLeft <= 0) {
+                    STATE.evasionActive = false;
+                    STATE.evasionActiveTicksLeft = 0;
+                }
+            } else if (STATE.evasionChargeTicks < EVASION_FULL_CHARGE_TICKS) {
+                STATE.evasionChargeTicks++;
+            }
+
             if (STATE.orangeShieldCooldownTicks > 0) {
                 STATE.orangeShieldCooldownTicks--;
                 if (STATE.orangeShieldCooldownTicks == 0) {
                     player.displayClientMessage(Component.literal("§7[Rick Prime] Esfera naranja desactivada."), true);
                 }
             }
-
-            if (STATE.evasionActive) {
-                STATE.evasionActiveTicksLeft--;
-                if (STATE.evasionActiveTicksLeft <= 0) {
-                    STATE.evasionActive = false;
-                    player.displayClientMessage(Component.literal("§7[Rick Prime] Evasión terminada. Empezando a recargar."), true);
-                }
-            } else if (STATE.evasionChargeTicks < EVASION_FULL_CHARGE_TICKS) {
-                // Solo carga cuando la evasión ya NO está activa (primero se acaba, luego recién recarga).
-                STATE.evasionChargeTicks++;
-            }
-
-            // (Se quitó el clamp de vida que había aquí: corría cada tick sobre el
-            // jugador del CLIENTE y peleaba contra el valor real que manda el servidor
-            // integrado, causando que "la vida no coincida". El clamp real ya ocurre
-            // en onPlayerHurt/onLivingDeath sobre el jugador correcto (event.getEntity()).)
 
             for (FallenLimb limb : STATE.fallenLimbs) {
                 if (!limb.returning) {
@@ -837,31 +839,6 @@ public class RickPrimeMod {
             player.setPose(Pose.STANDING);
             clearMovementPenalty(player);
             player.displayClientMessage(Component.literal("§a[Rick Prime] ¡Te has regenerado al 100%!"), true);
-        }
-
-        // Revisa cada medio segundo a los mobs cercanos que YA te tenían fichado
-        // desde antes de perder extremidades (los eventos de arriba solo atrapan
-        // el momento exacto de un nuevo ataque/objetivo, no a los que ya venían
-        // persiguiéndote).
-        @SubscribeEvent
-        public static void onServerTick(TickEvent.ServerTickEvent event) {
-            if (event.phase != TickEvent.Phase.END) return;
-            if (STATE.partsLost <= 1) return;
-
-            serverTickCounter++;
-            if (serverTickCounter % 10 != 0) return;
-
-            Player clientPlayer = Minecraft.getInstance().player;
-            if (clientPlayer == null) return;
-            Player real = resolveAuthoritative(clientPlayer);
-            if (!(real.level() instanceof ServerLevel serverLevel)) return;
-
-            AABB area = real.getBoundingBox().inflate(16.0);
-            for (Mob mob : serverLevel.getEntitiesOfClass(Mob.class, area)) {
-                if (mob.getTarget() == real && shouldMobStopAttacking(mob, real)) {
-                    mob.setTarget(null);
-                }
-            }
         }
     }
 
@@ -1002,7 +979,6 @@ public class RickPrimeMod {
             bufferSource.endBatch();
         }
 
-        // Esfera 3D de color naranja que rodea completamente al jugador
         private static void renderOrangeCircularShield(Player player, PoseStack poseStack,
                                                        MultiBufferSource.BufferSource bufferSource,
                                                        Vec3 camPos, float partialTick) {
