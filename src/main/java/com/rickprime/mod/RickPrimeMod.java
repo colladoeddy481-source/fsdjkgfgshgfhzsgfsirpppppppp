@@ -187,7 +187,7 @@ public class RickPrimeMod {
             boolean wasOff = STATE.orangeShieldCooldownTicks <= 0;
             STATE.orangeShieldCooldownTicks = BodyState.SHIELD_IDLE_TIMEOUT_TICKS;
             if (wasOff) {
-                player.displayClientMessage(Component.literal("§6[Rick Prime] ¡Escudo circular naranja activado!"), true);
+                player.displayClientMessage(Component.literal("§6[Rick Prime] ¡Esfera naranja activada!"), true);
             }
         }
 
@@ -286,7 +286,6 @@ public class RickPrimeMod {
                 return;
             }
 
-            // Si ya está abatido o en 1 corazón (2.0f) o menos sin absorción, nunca baja más ni muere
             if (STATE.isDown || currentHealth <= 2.0f || (currentHealth <= 2.0f && currentAbsorption <= 0.0f)) {
                 event.setCanceled(true);
                 clampPlayerToOneHeart(player);
@@ -364,7 +363,6 @@ public class RickPrimeMod {
             processLostHealthLimbs(player, damage, false);
         }
 
-        // Las comidas aumentan la barra de comida y saturación, pero NO curan vida ni traen extremidades
         @SubscribeEvent
         public static void onUseItemFinish(LivingEntityUseItemEvent.Finish event) {
             if (!isLocalPlayer(event.getEntity())) return;
@@ -632,11 +630,10 @@ public class RickPrimeMod {
             if (STATE.orangeShieldCooldownTicks > 0) {
                 STATE.orangeShieldCooldownTicks--;
                 if (STATE.orangeShieldCooldownTicks == 0) {
-                    player.displayClientMessage(Component.literal("§7[Rick Prime] Escudo circular naranja desactivado."), true);
+                    player.displayClientMessage(Component.literal("§7[Rick Prime] Esfera naranja desactivada."), true);
                 }
             }
 
-            // Salvaguarda continua: nunca permite que baje de 1 corazón (2.0f) fuera de regeneración
             if (!STATE.regenerating && (STATE.isDown || player.getHealth() < 2.0f)) {
                 clampPlayerToOneHeart(player);
             }
@@ -837,6 +834,7 @@ public class RickPrimeMod {
             bufferSource.endBatch();
         }
 
+        // Esfera 3D de color naranja que rodea completamente al jugador
         private static void renderOrangeCircularShield(Player player, PoseStack poseStack,
                                                        MultiBufferSource.BufferSource bufferSource,
                                                        Vec3 camPos, float partialTick) {
@@ -844,33 +842,52 @@ public class RickPrimeMod {
             double py = player.yo + (player.getY() - player.yo) * partialTick + 1.0;
             double pz = player.zo + (player.getZ() - player.zo) * partialTick;
 
-            float radius = 1.35f;
-            int segments = 48;
-            float alpha = Math.min(0.65f, (STATE.orangeShieldCooldownTicks / (float) BodyState.SHIELD_IDLE_TIMEOUT_TICKS) * 0.75f);
+            float radius = 1.45f;
+            int stacks = 18;
+            int slices = 28;
+            float alpha = Math.min(0.42f, (STATE.orangeShieldCooldownTicks / (float) BodyState.SHIELD_IDLE_TIMEOUT_TICKS) * 0.50f);
 
             poseStack.pushPose();
             poseStack.translate(px - camPos.x, py - camPos.y, pz - camPos.z);
-            poseStack.mulPose(Axis.YP.rotationDegrees((player.tickCount + partialTick) * 4.0f));
+            poseStack.mulPose(Axis.YP.rotationDegrees((player.tickCount + partialTick) * 3.0f));
 
             Matrix4f mat = poseStack.last().pose();
             VertexConsumer consumer = bufferSource.getBuffer(RenderType.translucent());
 
-            for (int i = 0; i < segments; i++) {
-                double a1 = (2.0 * Math.PI * i) / segments;
-                double a2 = (2.0 * Math.PI * (i + 1)) / segments;
+            for (int i = 0; i < stacks; i++) {
+                double phi1 = Math.PI * ((double) i / stacks);
+                double phi2 = Math.PI * ((double) (i + 1) / stacks);
 
-                float x1 = (float) (Math.cos(a1) * radius);
-                float z1 = (float) (Math.sin(a1) * radius);
-                float x2 = (float) (Math.cos(a2) * radius);
-                float z2 = (float) (Math.sin(a2) * radius);
+                float y1 = (float) (Math.cos(phi1) * radius);
+                float r1 = (float) (Math.sin(phi1) * radius);
 
-                float yBottom = -0.55f;
-                float yTop = 0.55f;
+                float y2 = (float) (Math.cos(phi2) * radius);
+                float r2 = (float) (Math.sin(phi2) * radius);
 
-                consumer.vertex(mat, x1, yBottom, z1).color(1.0f, 0.53f, 0.0f, alpha).uv(0, 0).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
-                consumer.vertex(mat, x2, yBottom, z2).color(1.0f, 0.53f, 0.0f, alpha).uv(1, 0).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
-                consumer.vertex(mat, x2, yTop, z2).color(1.0f, 0.53f, 0.0f, alpha).uv(1, 1).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
-                consumer.vertex(mat, x1, yTop, z1).color(1.0f, 0.53f, 0.0f, alpha).uv(0, 1).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
+                for (int j = 0; j < slices; j++) {
+                    double theta1 = 2.0 * Math.PI * ((double) j / slices);
+                    double theta2 = 2.0 * Math.PI * ((double) (j + 1) / slices);
+
+                    float cosT1 = (float) Math.cos(theta1);
+                    float sinT1 = (float) Math.sin(theta1);
+                    float cosT2 = (float) Math.cos(theta2);
+                    float sinT2 = (float) Math.sin(theta2);
+
+                    float x1a = r1 * cosT1;
+                    float z1a = r1 * sinT1;
+                    float x1b = r1 * cosT2;
+                    float z1b = r1 * sinT2;
+
+                    float x2b = r2 * cosT2;
+                    float z2b = r2 * sinT2;
+                    float x2a = r2 * cosT1;
+                    float z2a = r2 * sinT1;
+
+                    consumer.vertex(mat, x1a, y1, z1a).color(1.0f, 0.53f, 0.0f, alpha).uv(0, 0).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
+                    consumer.vertex(mat, x1b, y1, z1b).color(1.0f, 0.53f, 0.0f, alpha).uv(1, 0).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
+                    consumer.vertex(mat, x2b, y2, z2b).color(1.0f, 0.53f, 0.0f, alpha).uv(1, 1).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
+                    consumer.vertex(mat, x2a, y2, z2a).color(1.0f, 0.53f, 0.0f, alpha).uv(0, 1).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
+                }
             }
 
             poseStack.popPose();
