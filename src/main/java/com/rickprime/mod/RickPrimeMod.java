@@ -39,6 +39,7 @@ import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.food.FoodData;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.InputEvent;
@@ -158,6 +159,7 @@ public class RickPrimeMod {
     }
 
     private static final BodyState STATE = new BodyState();
+    private static int serverTickCounter = 0;
 
     private static final UUID SPEED_MODIFIER_ID = UUID.fromString("5a3f9c10-1e2d-4b7a-9f6e-000000000001");
     private static final AttributeModifier CRAWL_SPEED_MOD =
@@ -280,9 +282,9 @@ public class RickPrimeMod {
             if (chance <= 0.0) return false;
             if (chance >= 1.0) return true;
 
-            long seed = ((long) attacker.getId() * 31L) ^ ((long) STATE.partsLost * 1315423911L);
-            double roll = new Random(seed).nextDouble();
-            return roll < chance;
+            // Tirada independiente en cada intento (no una semilla fija por mob),
+            // para que el % se cumpla de verdad a lo largo del tiempo.
+            return new Random().nextDouble() < chance;
         }
 
         @SubscribeEvent(priority = EventPriority.HIGHEST)
@@ -305,6 +307,9 @@ public class RickPrimeMod {
 
             if (shouldMobStopAttacking(event.getEntity(), player)) {
                 event.setCanceled(true);
+                if (event.getEntity() instanceof Mob mob) {
+                    mob.setTarget(null);
+                }
             }
         }
 
@@ -331,8 +336,9 @@ public class RickPrimeMod {
             }
 
             Entity attacker = event.getSource().getEntity();
-            if (attacker instanceof Mob && shouldMobStopAttacking(attacker, player)) {
+            if (attacker instanceof Mob mob && shouldMobStopAttacking(attacker, player)) {
                 event.setCanceled(true);
+                mob.setTarget(null);
             }
         }
 
@@ -831,6 +837,31 @@ public class RickPrimeMod {
             player.setPose(Pose.STANDING);
             clearMovementPenalty(player);
             player.displayClientMessage(Component.literal("§a[Rick Prime] ¡Te has regenerado al 100%!"), true);
+        }
+
+        // Revisa cada medio segundo a los mobs cercanos que YA te tenían fichado
+        // desde antes de perder extremidades (los eventos de arriba solo atrapan
+        // el momento exacto de un nuevo ataque/objetivo, no a los que ya venían
+        // persiguiéndote).
+        @SubscribeEvent
+        public static void onServerTick(TickEvent.ServerTickEvent event) {
+            if (event.phase != TickEvent.Phase.END) return;
+            if (STATE.partsLost <= 1) return;
+
+            serverTickCounter++;
+            if (serverTickCounter % 10 != 0) return;
+
+            Player clientPlayer = Minecraft.getInstance().player;
+            if (clientPlayer == null) return;
+            Player real = resolveAuthoritative(clientPlayer);
+            if (!(real.level() instanceof ServerLevel serverLevel)) return;
+
+            AABB area = real.getBoundingBox().inflate(16.0);
+            for (Mob mob : serverLevel.getEntitiesOfClass(Mob.class, area)) {
+                if (mob.getTarget() == real && shouldMobStopAttacking(mob, real)) {
+                    mob.setTarget(null);
+                }
+            }
         }
     }
 
