@@ -168,7 +168,7 @@ public class RickPrimeMod {
             new AttributeModifier(SPEED_MODIFIER_ID, "rickprime.immobile_speed", -1.0, AttributeModifier.Operation.MULTIPLY_TOTAL);
 
     private static final int EVASION_FULL_CHARGE_TICKS = 3 * 60 * 20; // 3 minutos para cargar
-    private static final int EVASION_DURATION_TICKS = 2 * 60 * 20;    // 2 minutos activa
+    private static final int EVASION_DURATION_TICKS = 1 * 60 * 20;    // 1 minuto activa
 
     private static final IGuiOverlay EVASION_BAR_OVERLAY = (gui, guiGraphics, partialTick, width, height) ->
             renderEvasionBar(guiGraphics, width, height);
@@ -762,10 +762,10 @@ public class RickPrimeMod {
                 STATE.evasionActiveTicksLeft--;
                 if (STATE.evasionActiveTicksLeft <= 0) {
                     STATE.evasionActive = false;
-                    player.displayClientMessage(Component.literal("§7[Rick Prime] Evasión terminada."), true);
+                    player.displayClientMessage(Component.literal("§7[Rick Prime] Evasión terminada. Empezando a recargar."), true);
                 }
-            }
-            if (STATE.evasionChargeTicks < EVASION_FULL_CHARGE_TICKS) {
+            } else if (STATE.evasionChargeTicks < EVASION_FULL_CHARGE_TICKS) {
+                // Solo carga cuando la evasión ya NO está activa (primero se acaba, luego recién recarga).
                 STATE.evasionChargeTicks++;
             }
 
