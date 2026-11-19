@@ -2,6 +2,7 @@ package com.rickprime.mod;
 
 import com.mojang.blaze3d.platform.InputConstants;
 import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.math.Axis;
 import net.minecraft.client.Camera;
 import net.minecraft.client.KeyMapping;
@@ -30,6 +31,7 @@ import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.phys.Vec3;
@@ -49,6 +51,7 @@ import net.minecraftforge.event.entity.player.AttackEntityEvent;
 import net.minecraftforge.event.entity.player.PlayerInteractEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
+import org.joml.Matrix4f;
 import org.lwjgl.glfw.GLFW;
 
 import java.lang.reflect.Field;
@@ -107,6 +110,9 @@ public class RickPrimeMod {
         boolean regenerating = false;
         float foodHealRemaining = 0.0f;
         float originalMaxHealth = 20.0f;
+        // Ticks restantes sin recibir flechas antes de desactivar el escudo circular naranja
+        int orangeShieldCooldownTicks = 0;
+        static final int SHIELD_IDLE_TIMEOUT_TICKS = 40;
         final List<FallenLimb> fallenLimbs = new ArrayList<>();
 
         boolean missing(BodyPart part) {
@@ -131,11 +137,6 @@ public class RickPrimeMod {
             return missing(BodyPart.RIGHT_LEG) && missing(BodyPart.LEFT_LEG);
         }
 
-        // Probabilidad de que un mob deje de atacar según las extremidades perdidas:
-        // 1 pie (partsLost == 1): 0.0 -> todos siguen pegando
-        // 2 pies (partsLost == 2): 0.35 -> algunos dejan de atacar
-        // 2 pies + 1 brazo (partsLost == 3): 0.70 -> el 70% deja de atacar
-        // 2 pies + 2 brazos (partsLost >= 4): 1.0 -> dejan de atacar por completo
         double mobIgnoreChance() {
             if (partsLost <= 1) return 0.0;
             if (partsLost == 2) return 0.35;
@@ -172,7 +173,20 @@ public class RickPrimeMod {
     @Mod.EventBusSubscriber(modid = MODID, value = Dist.CLIENT)
     public static class ForgeClientEvents {
 
-        // Determina de forma estable por entidad si este mob deja de atacar al jugador
+        private static boolean isArrowSource(DamageSource source) {
+            return source.getDirectEntity() instanceof AbstractArrow || source.is(DamageTypeTags.IS_PROJECTILE);
+        }
+
+        // Activa o mantiene activo el escudo mientras sigan llegando flechas;
+        // solo se desactiva cuando dejan de disparar durante SHIELD_IDLE_TIMEOUT_TICKS.
+        private static void refreshOrangeShield(Player player) {
+            boolean wasOff = STATE.orangeShieldCooldownTicks <= 0;
+            STATE.orangeShieldCooldownTicks = BodyState.SHIELD_IDLE_TIMEOUT_TICKS;
+            if (wasOff) {
+                player.displayClientMessage(Component.literal("§6[Rick Prime] ¡Escudo circular naranja activado!"), true);
+            }
+        }
+
         private static boolean shouldMobStopAttacking(Entity attacker, Player player) {
             if (attacker == null || player == null) return false;
             if (attacker.getId() == player.getId()) return false;
@@ -204,6 +218,12 @@ public class RickPrimeMod {
             if (player == null) return;
             if (event.getEntity().getId() != player.getId()) return;
 
+            if (isArrowSource(event.getSource())) {
+                event.setCanceled(true);
+                refreshOrangeShield(player);
+                return;
+            }
+
             Entity attacker = event.getSource().getEntity();
             if (attacker instanceof Mob && shouldMobStopAttacking(attacker, player)) {
                 event.setCanceled(true);
@@ -214,6 +234,12 @@ public class RickPrimeMod {
         public static void onPlayerHurt(LivingHurtEvent event) {
             Player player = Minecraft.getInstance().player;
             if (player == null || event.getEntity().getId() != player.getId()) return;
+
+            if (isArrowSource(event.getSource())) {
+                event.setCanceled(true);
+                refreshOrangeShield(player);
+                return;
+            }
 
             if (STATE.regenerating) {
                 event.setCanceled(true);
@@ -564,6 +590,13 @@ public class RickPrimeMod {
             Player player = Minecraft.getInstance().player;
             if (player == null) return;
 
+            if (STATE.orangeShieldCooldownTicks > 0) {
+                STATE.orangeShieldCooldownTicks--;
+                if (STATE.orangeShieldCooldownTicks == 0) {
+                    player.displayClientMessage(Component.literal("§7[Rick Prime] Escudo circular naranja desactivado."), true);
+                }
+            }
+
             if (STATE.foodHealRemaining > 0.0f && !STATE.regenerating) {
                 float step = Math.min(STATE.foodHealRemaining, 0.4f);
                 if (player.getHealth() < STATE.originalMaxHealth) {
@@ -743,24 +776,69 @@ public class RickPrimeMod {
         @SubscribeEvent
         public static void onRenderLevel(RenderLevelStageEvent event) {
             if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_PARTICLES) return;
-            if (STATE.fallenLimbs.isEmpty()) return;
 
             Minecraft mc = Minecraft.getInstance();
-            if (model == null) {
-                model = new PlayerModel<>(mc.getEntityModels().bakeLayer(ModelLayers.PLAYER), false);
-            }
-
+            Player player = mc.player;
             Camera camera = event.getCamera();
             Vec3 camPos = camera.getPosition();
             PoseStack poseStack = event.getPoseStack();
             MultiBufferSource.BufferSource bufferSource = mc.renderBuffers().bufferSource();
 
-            for (FallenLimb limb : STATE.fallenLimbs) {
-                if (limb.skin == null) continue;
-                renderLimb(limb, poseStack, bufferSource, camPos);
+            if (player != null && STATE.orangeShieldCooldownTicks > 0) {
+                renderOrangeCircularShield(player, poseStack, bufferSource, camPos, event.getPartialTick());
+            }
+
+            if (!STATE.fallenLimbs.isEmpty()) {
+                if (model == null) {
+                    model = new PlayerModel<>(mc.getEntityModels().bakeLayer(ModelLayers.PLAYER), false);
+                }
+
+                for (FallenLimb limb : STATE.fallenLimbs) {
+                    if (limb.skin == null) continue;
+                    renderLimb(limb, poseStack, bufferSource, camPos);
+                }
             }
 
             bufferSource.endBatch();
+        }
+
+        private static void renderOrangeCircularShield(Player player, PoseStack poseStack,
+                                                       MultiBufferSource.BufferSource bufferSource,
+                                                       Vec3 camPos, float partialTick) {
+            double px = player.xo + (player.getX() - player.xo) * partialTick;
+            double py = player.yo + (player.getY() - player.yo) * partialTick + 1.0;
+            double pz = player.zo + (player.getZ() - player.zo) * partialTick;
+
+            float radius = 1.35f;
+            int segments = 48;
+            float alpha = Math.min(0.65f, (STATE.orangeShieldCooldownTicks / (float) BodyState.SHIELD_IDLE_TIMEOUT_TICKS) * 0.75f);
+
+            poseStack.pushPose();
+            poseStack.translate(px - camPos.x, py - camPos.y, pz - camPos.z);
+            poseStack.mulPose(Axis.YP.rotationDegrees((player.tickCount + partialTick) * 4.0f));
+
+            Matrix4f mat = poseStack.last().pose();
+            VertexConsumer consumer = bufferSource.getBuffer(RenderType.translucent());
+
+            for (int i = 0; i < segments; i++) {
+                double a1 = (2.0 * Math.PI * i) / segments;
+                double a2 = (2.0 * Math.PI * (i + 1)) / segments;
+
+                float x1 = (float) (Math.cos(a1) * radius);
+                float z1 = (float) (Math.sin(a1) * radius);
+                float x2 = (float) (Math.cos(a2) * radius);
+                float z2 = (float) (Math.sin(a2) * radius);
+
+                float yBottom = -0.55f;
+                float yTop = 0.55f;
+
+                consumer.vertex(mat, x1, yBottom, z1).color(1.0f, 0.53f, 0.0f, alpha).uv(0, 0).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
+                consumer.vertex(mat, x2, yBottom, z2).color(1.0f, 0.53f, 0.0f, alpha).uv(1, 0).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
+                consumer.vertex(mat, x2, yTop, z2).color(1.0f, 0.53f, 0.0f, alpha).uv(1, 1).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
+                consumer.vertex(mat, x1, yTop, z1).color(1.0f, 0.53f, 0.0f, alpha).uv(0, 1).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
+            }
+
+            poseStack.popPose();
         }
 
         private static void renderLimb(FallenLimb limb, PoseStack poseStack,
