@@ -21,7 +21,10 @@ import net.minecraft.tags.DamageTypeTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageTypes;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.HumanoidArm;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
@@ -38,6 +41,8 @@ import net.minecraftforge.client.event.RenderHandEvent;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
 import net.minecraftforge.client.event.RenderPlayerEvent;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.entity.living.LivingAttackEvent;
+import net.minecraftforge.event.entity.living.LivingChangeTargetEvent;
 import net.minecraftforge.event.entity.living.LivingEntityUseItemEvent;
 import net.minecraftforge.event.entity.living.LivingHurtEvent;
 import net.minecraftforge.event.entity.player.AttackEntityEvent;
@@ -49,6 +54,7 @@ import org.lwjgl.glfw.GLFW;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 import java.util.UUID;
 
 @Mod(RickPrimeMod.MODID)
@@ -98,8 +104,8 @@ public class RickPrimeMod {
         float healthLostAccumulated = 0.0f;
         boolean isDown = false;
         boolean isImmobilized = false;
-        boolean regenerating = false; // Solo se activa al presionar la tecla 'R' para traer extremidades
-        float foodHealRemaining = 0.0f; // Curación gradual por comida/manzana encantada sin traer extremidades
+        boolean regenerating = false;
+        float foodHealRemaining = 0.0f;
         float originalMaxHealth = 20.0f;
         final List<FallenLimb> fallenLimbs = new ArrayList<>();
 
@@ -123,6 +129,18 @@ public class RickPrimeMod {
 
         boolean bothLegsMissing() {
             return missing(BodyPart.RIGHT_LEG) && missing(BodyPart.LEFT_LEG);
+        }
+
+        // Probabilidad de que un mob deje de atacar según las extremidades perdidas:
+        // 1 pie (partsLost == 1): 0.0 -> todos siguen pegando
+        // 2 pies (partsLost == 2): 0.35 -> algunos dejan de atacar
+        // 2 pies + 1 brazo (partsLost == 3): 0.70 -> el 70% deja de atacar
+        // 2 pies + 2 brazos (partsLost >= 4): 1.0 -> dejan de atacar por completo
+        double mobIgnoreChance() {
+            if (partsLost <= 1) return 0.0;
+            if (partsLost == 2) return 0.35;
+            if (partsLost == 3) return 0.70;
+            return 1.0;
         }
     }
 
@@ -154,6 +172,44 @@ public class RickPrimeMod {
     @Mod.EventBusSubscriber(modid = MODID, value = Dist.CLIENT)
     public static class ForgeClientEvents {
 
+        // Determina de forma estable por entidad si este mob deja de atacar al jugador
+        private static boolean shouldMobStopAttacking(Entity attacker, Player player) {
+            if (attacker == null || player == null) return false;
+            if (attacker.getId() == player.getId()) return false;
+
+            double chance = STATE.mobIgnoreChance();
+            if (chance <= 0.0) return false;
+            if (chance >= 1.0) return true;
+
+            long seed = ((long) attacker.getId() * 31L) ^ ((long) STATE.partsLost * 1315423911L);
+            double roll = new Random(seed).nextDouble();
+            return roll < chance;
+        }
+
+        @SubscribeEvent
+        public static void onLivingChangeTarget(LivingChangeTargetEvent event) {
+            Player player = Minecraft.getInstance().player;
+            if (player == null) return;
+            LivingEntity newTarget = event.getNewTarget();
+            if (newTarget == null || newTarget.getId() != player.getId()) return;
+
+            if (shouldMobStopAttacking(event.getEntity(), player)) {
+                event.setCanceled(true);
+            }
+        }
+
+        @SubscribeEvent
+        public static void onLivingAttack(LivingAttackEvent event) {
+            Player player = Minecraft.getInstance().player;
+            if (player == null) return;
+            if (event.getEntity().getId() != player.getId()) return;
+
+            Entity attacker = event.getSource().getEntity();
+            if (attacker instanceof Mob && shouldMobStopAttacking(attacker, player)) {
+                event.setCanceled(true);
+            }
+        }
+
         @SubscribeEvent
         public static void onPlayerHurt(LivingHurtEvent event) {
             Player player = Minecraft.getInstance().player;
@@ -173,7 +229,6 @@ public class RickPrimeMod {
                 return;
             }
 
-            // Si ya está a 1 corazón (2.0f) sin absorción o abatido: inmortal
             if (STATE.isDown || (currentHealth <= 2.0f && currentAbsorption <= 0.0f)) {
                 event.setCanceled(true);
                 player.setHealth(2.0f);
@@ -187,7 +242,6 @@ public class RickPrimeMod {
             boolean isExplosion = source.is(DamageTypeTags.IS_EXPLOSION);
             boolean isFall = source.is(DamageTypes.FALL) || source.is(DamageTypeTags.IS_FALL);
 
-            // Calcula cuánto daño total se puede absorber antes de llegar a 1 corazón (2.0f de salud)
             float maxAbsorbableBeforeFloor = Math.max(0.0f, totalPool - 2.0f);
             float actualTotalLost = Math.min(damage, maxAbsorbableBeforeFloor);
 
@@ -240,7 +294,6 @@ public class RickPrimeMod {
                 return;
             }
 
-            // Si el golpe llevaría la vida total a 1 corazón (2.0f) o menos
             if (totalPool - damage <= 2.0f) {
                 event.setCanceled(true);
                 player.setAbsorptionAmount(0.0f);
@@ -253,12 +306,9 @@ public class RickPrimeMod {
                 return;
             }
 
-            // Daño normal: contabiliza la pérdida usando toda la vida disponible (absorción + corazones)
             processLostHealthLimbs(player, damage, false);
         }
 
-        // Al terminar de comer un alimento o manzana encantada, sube vida gradualmente
-        // pero NO activa STATE.regenerating ni trae las extremidades (eso es solo con 'R').
         @SubscribeEvent
         public static void onUseItemFinish(LivingEntityUseItemEvent.Finish event) {
             Player localPlayer = Minecraft.getInstance().player;
@@ -267,9 +317,9 @@ public class RickPrimeMod {
             ItemStack stack = event.getItem();
             if (!stack.isEdible()) return;
 
-            float healAmount = 4.0f; // 2 corazones de recuperación gradual por alimento
+            float healAmount = 4.0f;
             if (stack.is(Items.ENCHANTED_GOLDEN_APPLE)) {
-                healAmount = 14.0f; // Recuperación gradual más amplia para manzana encantada
+                healAmount = 14.0f;
             } else if (stack.is(Items.GOLDEN_APPLE)) {
                 healAmount = 6.0f;
             }
@@ -443,10 +493,10 @@ public class RickPrimeMod {
 
             if (!flyingOut) {
                 String partName = switch (lost) {
-                    case RIGHT_LEG -> "la pierna derecha (2 corazones perdidos)";
-                    case LEFT_LEG -> "la pierna izquierda (4 corazones perdidos)";
-                    case RIGHT_ARM -> "el brazo derecho (6 corazones perdidos · Mano principal bloqueada)";
-                    case LEFT_ARM -> "el brazo izquierdo (8 corazones perdidos · Mano secundaria bloqueada)";
+                    case RIGHT_LEG -> "la pierna derecha (Mobs te siguen atacando)";
+                    case LEFT_LEG -> "la pierna izquierda (Algunos mobs dejan de atacarte)";
+                    case RIGHT_ARM -> "el brazo derecho (70% de los mobs dejan de atacarte)";
+                    case LEFT_ARM -> "el brazo izquierdo (Los mobs dejan de atacarte por completo)";
                 };
                 player.displayClientMessage(Component.literal("§c[Rick Prime] ¡Perdiste " + partName + "!"), true);
             }
@@ -514,7 +564,6 @@ public class RickPrimeMod {
             Player player = Minecraft.getInstance().player;
             if (player == null) return;
 
-            // Curación gradual por comida/manzana encantada (NO trae extremidades caídas)
             if (STATE.foodHealRemaining > 0.0f && !STATE.regenerating) {
                 float step = Math.min(STATE.foodHealRemaining, 0.4f);
                 if (player.getHealth() < STATE.originalMaxHealth) {
