@@ -175,8 +175,6 @@ public class RickPrimeMod {
             }
         }
 
-        // --- BLOQUEO DE INVENTARIO Y MANOS SEGÚN BRAZO PERDIDO ---
-
         @SubscribeEvent
         public static void onRightClickItem(PlayerInteractEvent.RightClickItem event) {
             Player localPlayer = Minecraft.getInstance().player;
@@ -476,6 +474,8 @@ public class RickPrimeMod {
         }
     }
 
+    // ================= Render de las extremidades caídas (limpio sin ítems) =================
+
     @Mod.EventBusSubscriber(modid = MODID, value = Dist.CLIENT)
     public static class LimbRenderer {
 
@@ -519,6 +519,14 @@ public class RickPrimeMod {
                 case RIGHT_ARM -> model.rightSleeve;
                 case LEFT_ARM -> model.leftSleeve;
             };
+
+            // Reseteamos rotaciones para evitar que cargue animaciones de comer o sostener ítems
+            model.head.xRot = 0; model.head.yRot = 0; model.head.zRot = 0;
+            model.body.xRot = 0; model.body.yRot = 0; model.body.zRot = 0;
+            model.rightArm.xRot = 0; model.rightArm.yRot = 0; model.rightArm.zRot = 0;
+            model.leftArm.xRot = 0; model.leftArm.yRot = 0; model.leftArm.zRot = 0;
+            model.rightLeg.xRot = 0; model.rightLeg.yRot = 0; model.rightLeg.zRot = 0;
+            model.leftLeg.xRot = 0; model.leftLeg.yRot = 0; model.leftLeg.zRot = 0;
 
             model.head.visible = false;
             model.hat.visible = false;
