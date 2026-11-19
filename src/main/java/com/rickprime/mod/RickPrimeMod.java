@@ -18,6 +18,7 @@ import net.minecraft.tags.DamageTypeTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageTypes;
+import net.minecraft.world.entity.HumanoidArm;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
@@ -28,9 +29,11 @@ import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.InputEvent;
 import net.minecraftforge.client.event.MovementInputUpdateEvent;
 import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
+import net.minecraftforge.client.event.RenderHandEvent;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
 import net.minecraftforge.client.event.RenderPlayerEvent;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.entity.living.LivingEntityUseItemEvent;
 import net.minecraftforge.event.entity.living.LivingHurtEvent;
 import net.minecraftforge.event.entity.player.AttackEntityEvent;
 import net.minecraftforge.event.entity.player.PlayerInteractEvent;
@@ -101,6 +104,10 @@ public class RickPrimeMod {
 
         boolean bothLegsMissing() {
             return missing(BodyPart.RIGHT_LEG) && missing(BodyPart.LEFT_LEG);
+        }
+
+        boolean isFullyRegenerated() {
+            return !regenerating && partsLost == 0;
         }
     }
 
@@ -175,8 +182,45 @@ public class RickPrimeMod {
             }
         }
 
+        // --- BLOQUEO DE MANOS Y COMER MIENTRAS FALTE EL BRAZO (ACTIVO HASTA REGENERAR AL 100%) ---
+
+        @SubscribeEvent
+        public static void onUseItemStart(LivingEntityUseItemEvent.Start event) {
+            if (STATE.isFullyRegenerated()) return;
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+
+            if (STATE.missing(BodyPart.RIGHT_ARM) || STATE.missing(BodyPart.LEFT_ARM)) {
+                event.setCanceled(true);
+            }
+        }
+
+        @SubscribeEvent
+        public static void onUseItemTick(LivingEntityUseItemEvent.Tick event) {
+            if (STATE.isFullyRegenerated()) return;
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+
+            if (STATE.missing(BodyPart.RIGHT_ARM) || STATE.missing(BodyPart.LEFT_ARM)) {
+                event.setCanceled(true);
+            }
+        }
+
+        @SubscribeEvent
+        public static void onRenderHand(RenderHandEvent event) {
+            if (STATE.isFullyRegenerated()) return;
+
+            boolean isRight = event.getHand() == InteractionHand.MAIN_HAND;
+            if (isRight && STATE.missing(BodyPart.RIGHT_ARM)) {
+                event.setCanceled(true);
+            } else if (!isRight && STATE.missing(BodyPart.LEFT_ARM)) {
+                event.setCanceled(true);
+            }
+        }
+
         @SubscribeEvent
         public static void onRightClickItem(PlayerInteractEvent.RightClickItem event) {
+            if (STATE.isFullyRegenerated()) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
 
@@ -191,6 +235,7 @@ public class RickPrimeMod {
 
         @SubscribeEvent
         public static void onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
+            if (STATE.isFullyRegenerated()) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
 
@@ -205,6 +250,7 @@ public class RickPrimeMod {
 
         @SubscribeEvent
         public static void onLeftClickBlock(PlayerInteractEvent.LeftClickBlock event) {
+            if (STATE.isFullyRegenerated()) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
 
@@ -215,6 +261,7 @@ public class RickPrimeMod {
 
         @SubscribeEvent
         public static void onAttackEntity(AttackEntityEvent event) {
+            if (STATE.isFullyRegenerated()) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
 
@@ -226,6 +273,7 @@ public class RickPrimeMod {
 
         @SubscribeEvent
         public static void onClickInput(InputEvent.InteractionKeyMappingTriggered event) {
+            if (STATE.isFullyRegenerated()) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null) return;
 
@@ -424,7 +472,7 @@ public class RickPrimeMod {
             player.setHealth(STATE.originalMaxHealth);
             player.setPose(Pose.STANDING);
             clearMovementPenalty(player);
-            player.displayClientMessage(Component.literal("§a[Rick Prime] ¡Te has regenerado con éxito!"), true);
+            player.displayClientMessage(Component.literal("§a[Rick Prime] ¡Te has regenerado al 100%!"), true);
         }
     }
 
@@ -433,6 +481,7 @@ public class RickPrimeMod {
 
         @SubscribeEvent
         public static void onRenderPlayerPre(RenderPlayerEvent.Pre event) {
+            if (STATE.isFullyRegenerated()) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
             if (STATE.partsLost == 0) return;
@@ -473,8 +522,6 @@ public class RickPrimeMod {
             playerModel.leftSleeve.visible = true;
         }
     }
-
-    // ================= Render de las extremidades caídas (limpio sin ítems) =================
 
     @Mod.EventBusSubscriber(modid = MODID, value = Dist.CLIENT)
     public static class LimbRenderer {
@@ -520,7 +567,6 @@ public class RickPrimeMod {
                 case LEFT_ARM -> model.leftSleeve;
             };
 
-            // Reseteamos rotaciones para evitar que cargue animaciones de comer o sostener ítems
             model.head.xRot = 0; model.head.yRot = 0; model.head.zRot = 0;
             model.body.xRot = 0; model.body.yRot = 0; model.body.zRot = 0;
             model.rightArm.xRot = 0; model.rightArm.yRot = 0; model.rightArm.zRot = 0;
