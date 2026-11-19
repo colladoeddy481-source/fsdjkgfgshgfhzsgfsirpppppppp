@@ -27,6 +27,8 @@ import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.InputEvent;
@@ -96,7 +98,8 @@ public class RickPrimeMod {
         float healthLostAccumulated = 0.0f;
         boolean isDown = false;
         boolean isImmobilized = false;
-        boolean regenerating = false;
+        boolean regenerating = false; // Solo se activa al presionar la tecla 'R' para traer extremidades
+        float foodHealRemaining = 0.0f; // Curación gradual por comida/manzana encantada sin traer extremidades
         float originalMaxHealth = 20.0f;
         final List<FallenLimb> fallenLimbs = new ArrayList<>();
 
@@ -156,24 +159,25 @@ public class RickPrimeMod {
             Player player = Minecraft.getInstance().player;
             if (player == null || event.getEntity().getId() != player.getId()) return;
 
-            // Invulnerable durante regeneración
             if (STATE.regenerating) {
                 event.setCanceled(true);
                 return;
             }
 
             float currentHealth = player.getHealth();
+            float currentAbsorption = player.getAbsorptionAmount();
+            float totalPool = currentHealth + currentAbsorption;
             float damage = event.getAmount();
 
-            // Si el daño es 0 o negativo (por ejemplo bloqueado totalmente por escudo), no hace nada
             if (damage <= 0.0f) {
                 return;
             }
 
-            // Si ya está a 1 corazón (2.0f) o abatido, es inmortal: no baja de 1 corazón ni muere
-            if (STATE.isDown || currentHealth <= 2.0f) {
+            // Si ya está a 1 corazón (2.0f) sin absorción o abatido: inmortal
+            if (STATE.isDown || (currentHealth <= 2.0f && currentAbsorption <= 0.0f)) {
                 event.setCanceled(true);
                 player.setHealth(2.0f);
+                player.setAbsorptionAmount(0.0f);
                 STATE.isDown = true;
                 applyMovementPenalty(player);
                 return;
@@ -183,24 +187,24 @@ public class RickPrimeMod {
             boolean isExplosion = source.is(DamageTypeTags.IS_EXPLOSION);
             boolean isFall = source.is(DamageTypes.FALL) || source.is(DamageTypeTags.IS_FALL);
 
-            // Explosiones (Creeper, TNT, etc.): conservan el daño real y la protección del escudo.
-            // La cantidad de extremidades que salen volando depende de cuántos corazones quita la explosión:
-            // 1 corazón = 2.0f de daño.
-            if (isExplosion) {
-                float actualDamage = Math.min(damage, Math.max(0.0f, currentHealth - 2.0f));
-                float heartsLost = actualDamage / 2.0f;
+            // Calcula cuánto daño total se puede absorber antes de llegar a 1 corazón (2.0f de salud)
+            float maxAbsorbableBeforeFloor = Math.max(0.0f, totalPool - 2.0f);
+            float actualTotalLost = Math.min(damage, maxAbsorbableBeforeFloor);
 
+            if (isExplosion) {
+                float heartsLost = actualTotalLost / 2.0f;
                 int limbsToLaunch;
                 if (heartsLost >= 8.0f) {
-                    limbsToLaunch = 4; // Muy cerca / 8+ corazones: salen volando las 4 extremidades
+                    limbsToLaunch = 4;
                 } else if (heartsLost >= 6.0f) {
-                    limbsToLaunch = 3; // ~6 corazones: salen volando 3 extremidades
+                    limbsToLaunch = 3;
                 } else {
                     limbsToLaunch = Math.min(LOSS_ORDER.length - STATE.partsLost, (int) Math.floor(heartsLost / 2.0f));
                 }
 
-                if (currentHealth - damage <= 2.0f) {
+                if (totalPool - damage <= 2.0f) {
                     event.setCanceled(true);
+                    player.setAbsorptionAmount(0.0f);
                     player.setHealth(2.0f);
                     STATE.isDown = true;
                     if (limbsToLaunch >= 4) {
@@ -224,12 +228,11 @@ public class RickPrimeMod {
                 return;
             }
 
-            // Caídas de gran altura: si quitaría 9 o 10 corazones (18.0f o 20.0f) o deja <= 2.0f, queda a 1 corazón sin morir.
-            if (isFall && (damage >= 18.0f || currentHealth - damage <= 2.0f)) {
+            if (isFall && (damage >= 18.0f || totalPool - damage <= 2.0f)) {
                 event.setCanceled(true);
-                float actualLost = Math.max(0.0f, currentHealth - 2.0f);
+                player.setAbsorptionAmount(0.0f);
                 player.setHealth(2.0f);
-                processLostHealthLimbs(player, actualLost, damage >= 18.0f);
+                processLostHealthLimbs(player, actualTotalLost, damage >= 18.0f);
                 STATE.isDown = true;
                 applyMovementPenalty(player);
                 player.displayClientMessage(Component.literal(
@@ -237,12 +240,12 @@ public class RickPrimeMod {
                 return;
             }
 
-            // Si el golpe bajaría a 1 corazón (2.0f) o menos
-            if (currentHealth - damage <= 2.0f) {
+            // Si el golpe llevaría la vida total a 1 corazón (2.0f) o menos
+            if (totalPool - damage <= 2.0f) {
                 event.setCanceled(true);
-                float actualLost = Math.max(0.0f, currentHealth - 2.0f);
+                player.setAbsorptionAmount(0.0f);
                 player.setHealth(2.0f);
-                processLostHealthLimbs(player, actualLost, false);
+                processLostHealthLimbs(player, actualTotalLost, false);
                 STATE.isDown = true;
                 applyMovementPenalty(player);
                 player.displayClientMessage(Component.literal(
@@ -250,20 +253,28 @@ public class RickPrimeMod {
                 return;
             }
 
-            // Si estaba en 2 corazones (4.0f) y el daño lo baja por debajo de 1 corazón (2.0f), se queda en 1 corazón
-            float newHealth = currentHealth - damage;
-            if (currentHealth > 2.0f && newHealth < 2.0f) {
-                event.setCanceled(true);
-                float actualLost = currentHealth - 2.0f;
-                player.setHealth(2.0f);
-                processLostHealthLimbs(player, actualLost, false);
-                STATE.isDown = true;
-                applyMovementPenalty(player);
-                return;
+            // Daño normal: contabiliza la pérdida usando toda la vida disponible (absorción + corazones)
+            processLostHealthLimbs(player, damage, false);
+        }
+
+        // Al terminar de comer un alimento o manzana encantada, sube vida gradualmente
+        // pero NO activa STATE.regenerating ni trae las extremidades (eso es solo con 'R').
+        @SubscribeEvent
+        public static void onUseItemFinish(LivingEntityUseItemEvent.Finish event) {
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+
+            ItemStack stack = event.getItem();
+            if (!stack.isEdible()) return;
+
+            float healAmount = 4.0f; // 2 corazones de recuperación gradual por alimento
+            if (stack.is(Items.ENCHANTED_GOLDEN_APPLE)) {
+                healAmount = 14.0f; // Recuperación gradual más amplia para manzana encantada
+            } else if (stack.is(Items.GOLDEN_APPLE)) {
+                healAmount = 6.0f;
             }
 
-            // Daño normal: la vida baja normalmente y cada 2 corazones perdidos (4.0f) se pierde 1 extremidad
-            processLostHealthLimbs(player, damage, false);
+            STATE.foodHealRemaining = Math.min(20.0f, STATE.foodHealRemaining + healAmount);
         }
 
         private static void launchLimbsCount(Player player, int count, boolean flyingOut) {
@@ -488,12 +499,13 @@ public class RickPrimeMod {
 
         private static void startRegeneration(Player player) {
             STATE.regenerating = true;
+            STATE.foodHealRemaining = 0.0f;
             for (FallenLimb limb : STATE.fallenLimbs) {
                 limb.returning = true;
                 limb.returnStartPos = limb.worldPos;
                 limb.returnTick = 0;
             }
-            player.displayClientMessage(Component.literal("§a[Rick Prime] ¡Regenerándote!"), true);
+            player.displayClientMessage(Component.literal("§a[Rick Prime] ¡Regenerándote y recuperando extremidades!"), true);
         }
 
         @SubscribeEvent
@@ -501,6 +513,15 @@ public class RickPrimeMod {
             if (event.phase != TickEvent.Phase.END) return;
             Player player = Minecraft.getInstance().player;
             if (player == null) return;
+
+            // Curación gradual por comida/manzana encantada (NO trae extremidades caídas)
+            if (STATE.foodHealRemaining > 0.0f && !STATE.regenerating) {
+                float step = Math.min(STATE.foodHealRemaining, 0.4f);
+                if (player.getHealth() < STATE.originalMaxHealth) {
+                    player.setHealth(Math.min(STATE.originalMaxHealth, player.getHealth() + step));
+                }
+                STATE.foodHealRemaining = Math.max(0.0f, STATE.foodHealRemaining - step);
+            }
 
             for (FallenLimb limb : STATE.fallenLimbs) {
                 if (!limb.returning) {
@@ -553,6 +574,7 @@ public class RickPrimeMod {
             STATE.isImmobilized = false;
             STATE.partsLost = 0;
             STATE.healthLostAccumulated = 0.0f;
+            STATE.foodHealRemaining = 0.0f;
             STATE.fallenLimbs.clear();
             player.setHealth(STATE.originalMaxHealth);
             player.setPose(Pose.STANDING);
