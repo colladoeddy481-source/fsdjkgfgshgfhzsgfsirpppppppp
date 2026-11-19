@@ -93,6 +93,7 @@ public class RickPrimeMod {
 
     private static class BodyState {
         int partsLost = 0;
+        float healthLostAccumulated = 0.0f; // Vida acumulada perdida en este ciclo
         boolean isDown = false;
         boolean isImmobilized = false;
         boolean regenerating = false;
@@ -155,41 +156,90 @@ public class RickPrimeMod {
             Player player = Minecraft.getInstance().player;
             if (player == null || event.getEntity().getId() != player.getId()) return;
 
+            // Invulnerable durante regeneración
             if (STATE.regenerating) {
                 event.setCanceled(true);
                 return;
             }
 
-            if (STATE.isDown || STATE.isImmobilized) {
+            float currentHealth = player.getHealth();
+            float damage = event.getAmount();
+            DamageSource source = event.getSource();
+
+            // Si ya está a 1 corazón (2.0f) o abatido, es inmortal: no baja de 1 corazón ni muere
+            if (STATE.isDown || currentHealth <= 2.0f) {
                 event.setCanceled(true);
                 player.setHealth(2.0f);
+                STATE.isDown = true;
+                applyMovementPenalty(player);
                 return;
             }
-
-            DamageSource source = event.getSource();
-            float damage = event.getAmount();
-            float currentHealth = player.getHealth();
 
             boolean isExplosion = source.is(DamageTypeTags.IS_EXPLOSION);
-            boolean isHighFall = (source.is(DamageTypes.FALL) || source.is(DamageTypeTags.IS_FALL)) && damage >= 8.0f;
+            boolean isFall = source.is(DamageTypes.FALL) || source.is(DamageTypeTags.IS_FALL);
 
-            if (isExplosion || isHighFall) {
+            // Explosión: hace volar extremidades e inmoviliza a 1 corazón (2.0f)
+            if (isExplosion) {
                 event.setCanceled(true);
                 player.setHealth(2.0f);
-                shatterAllRemainingParts(player, isExplosion);
+                shatterAllRemainingParts(player, true);
                 return;
             }
 
+            // Caídas de gran altura: si el daño quitaría 9 o 10 corazones (18.0f o 20.0f) o deja <= 2.0f,
+            // se queda a 1 corazón (2.0f) sin morir.
+            if (isFall && (damage >= 18.0f || currentHealth - damage <= 2.0f)) {
+                event.setCanceled(true);
+                float actualLost = Math.max(0.0f, currentHealth - 2.0f);
+                player.setHealth(2.0f);
+                processLostHealthLimbs(player, actualLost, damage >= 18.0f);
+                STATE.isDown = true;
+                applyMovementPenalty(player);
+                player.displayClientMessage(Component.literal(
+                        "§4[Rick Prime] ¡Caída severa! Quedaste a 1 corazón (inmortal). Presiona 'R' para regenerarte."), true);
+                return;
+            }
+
+            // Si el golpe bajaría a 1 corazón (2.0f) o menos
             if (currentHealth - damage <= 2.0f) {
                 event.setCanceled(true);
+                float actualLost = Math.max(0.0f, currentHealth - 2.0f);
                 player.setHealth(2.0f);
-                if (STATE.partsLost < LOSS_ORDER.length) {
-                    loseNextBodyPart(player, false);
-                }
-            } else {
-                if (STATE.partsLost < LOSS_ORDER.length) {
-                    loseNextBodyPart(player, false);
-                }
+                processLostHealthLimbs(player, actualLost, false);
+                STATE.isDown = true;
+                applyMovementPenalty(player);
+                player.displayClientMessage(Component.literal(
+                        "§4[Rick Prime] ¡Llegaste a 1 corazón! Eres inmortal. Presiona 'R' para regenerarte."), true);
+                return;
+            }
+
+            // Daño normal: la vida baja normalmente y cada 2 corazones perdidos (4.0f) se pierde 1 extremidad
+            float newHealth = currentHealth - damage;
+            // Si estaba en 2 corazones (4.0f) y recibe daño, baja hacia 1 corazón (2.0f)
+            if (currentHealth > 2.0f && newHealth < 2.0f) {
+                event.setCanceled(true);
+                float actualLost = currentHealth - 2.0f;
+                player.setHealth(2.0f);
+                processLostHealthLimbs(player, actualLost, false);
+                STATE.isDown = true;
+                applyMovementPenalty(player);
+                return;
+            }
+
+            // Dejar que Minecraft aplique el daño normal y contabilizar los corazones perdidos
+            processLostHealthLimbs(player, damage, false);
+        }
+
+        /**
+         * Cada 2 corazones perdidos (4.0f de salud) se pierde la siguiente extremidad.
+         */
+        private static void processLostHealthLimbs(Player player, float lostHealth, boolean heavyFall) {
+            if (lostHealth <= 0.0f) return;
+            STATE.healthLostAccumulated += lostHealth;
+
+            while (STATE.healthLostAccumulated >= 4.0f && STATE.partsLost < LOSS_ORDER.length) {
+                STATE.healthLostAccumulated -= 4.0f;
+                loseNextBodyPart(player, heavyFall);
             }
         }
 
@@ -355,19 +405,12 @@ public class RickPrimeMod {
 
             if (!flyingOut) {
                 String partName = switch (lost) {
-                    case RIGHT_LEG -> "la pierna derecha";
-                    case LEFT_LEG -> "la pierna izquierda";
-                    case RIGHT_ARM -> "el brazo derecho (Mano principal bloqueada)";
-                    case LEFT_ARM -> "el brazo izquierdo (Mano secundaria bloqueada)";
+                    case RIGHT_LEG -> "la pierna derecha (2 corazones perdidos)";
+                    case LEFT_LEG -> "la pierna izquierda (4 corazones perdidos)";
+                    case RIGHT_ARM -> "el brazo derecho (6 corazones perdidos · Mano principal bloqueada)";
+                    case LEFT_ARM -> "el brazo izquierdo (8 corazones perdidos · Mano secundaria bloqueada)";
                 };
                 player.displayClientMessage(Component.literal("§c[Rick Prime] ¡Perdiste " + partName + "!"), true);
-
-                if (STATE.partsLost >= LOSS_ORDER.length) {
-                    STATE.isDown = true;
-                    player.setHealth(2.0f);
-                    player.displayClientMessage(Component.literal(
-                            "§4[Rick Prime] ¡Has quedado completamente desmembrado! Presiona 'R' para regenerarte."), true);
-                }
                 applyMovementPenalty(player);
             }
         }
@@ -411,7 +454,7 @@ public class RickPrimeMod {
             Player player = Minecraft.getInstance().player;
             if (player == null) return;
 
-            if (STATE.partsLost == 0 || STATE.regenerating) return;
+            if ((STATE.partsLost == 0 && !STATE.isDown && STATE.healthLostAccumulated <= 0.0f) || STATE.regenerating) return;
 
             startRegeneration(player);
         }
@@ -482,6 +525,7 @@ public class RickPrimeMod {
             STATE.isDown = false;
             STATE.isImmobilized = false;
             STATE.partsLost = 0;
+            STATE.healthLostAccumulated = 0.0f;
             STATE.fallenLimbs.clear();
             player.setHealth(STATE.originalMaxHealth);
             player.setPose(Pose.STANDING);
