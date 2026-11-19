@@ -106,7 +106,6 @@ public class RickPrimeMod {
             return false;
         }
 
-        // True si la extremidad no está unida al cuerpo (está perdida o volando de regreso)
         boolean armDetached(BodyPart arm) {
             if (!missing(arm)) return false;
             if (!regenerating) return true;
@@ -194,20 +193,20 @@ public class RickPrimeMod {
             }
         }
 
-        // --- BLOQUEO DE USO Y RENDER DE ÍTEMS SI EL BRAZO NO ESTÁ EN EL CUERPO ---
+        private static boolean shouldCancelUseItem(Player localPlayer, InteractionHand hand) {
+            if (hand == null) return STATE.armDetached(BodyPart.RIGHT_ARM) || STATE.armDetached(BodyPart.LEFT_ARM);
+            HumanoidArm mainArm = localPlayer.getMainArm();
+            boolean usingRight = (hand == InteractionHand.MAIN_HAND && mainArm == HumanoidArm.RIGHT)
+                    || (hand == InteractionHand.OFF_HAND && mainArm == HumanoidArm.LEFT);
+            return usingRight ? STATE.armDetached(BodyPart.RIGHT_ARM) : STATE.armDetached(BodyPart.LEFT_ARM);
+        }
 
         @SubscribeEvent
         public static void onUseItemStart(LivingEntityUseItemEvent.Start event) {
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
 
-            HumanoidArm mainArm = localPlayer.getMainArm();
-            boolean usingRight = (event.getHand() == InteractionHand.MAIN_HAND && mainArm == HumanoidArm.RIGHT)
-                    || (event.getHand() == InteractionHand.OFF_HAND && mainArm == HumanoidArm.LEFT);
-
-            if (usingRight && STATE.armDetached(BodyPart.RIGHT_ARM)) {
-                event.setCanceled(true);
-            } else if (!usingRight && STATE.armDetached(BodyPart.LEFT_ARM)) {
+            if (shouldCancelUseItem(localPlayer, localPlayer.getUsedItemHand())) {
                 event.setCanceled(true);
             }
         }
@@ -217,13 +216,7 @@ public class RickPrimeMod {
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
 
-            HumanoidArm mainArm = localPlayer.getMainArm();
-            boolean usingRight = (event.getHand() == InteractionHand.MAIN_HAND && mainArm == HumanoidArm.RIGHT)
-                    || (event.getHand() == InteractionHand.OFF_HAND && mainArm == HumanoidArm.LEFT);
-
-            if (usingRight && STATE.armDetached(BodyPart.RIGHT_ARM)) {
-                event.setCanceled(true);
-            } else if (!usingRight && STATE.armDetached(BodyPart.LEFT_ARM)) {
+            if (shouldCancelUseItem(localPlayer, localPlayer.getUsedItemHand())) {
                 event.setCanceled(true);
             }
         }
@@ -531,7 +524,6 @@ public class RickPrimeMod {
 
             PlayerModel<AbstractClientPlayer> playerModel = event.getRenderer().getModel();
 
-            // Ocultar extremidades que aún no estén reintegradas al cuerpo
             boolean rightLegOut = STATE.missing(BodyPart.RIGHT_LEG) && (!STATE.regenerating || isPartReturning(BodyPart.RIGHT_LEG));
             boolean leftLegOut  = STATE.missing(BodyPart.LEFT_LEG)  && (!STATE.regenerating || isPartReturning(BodyPart.LEFT_LEG));
             boolean rightArmOut = STATE.armDetached(BodyPart.RIGHT_ARM);
@@ -554,7 +546,6 @@ public class RickPrimeMod {
                 playerModel.leftSleeve.visible = false;
             }
 
-            // Si algún brazo está en el suelo (fuera del cuerpo), no renderizar el ítem en el cuerpo
             if (rightArmOut || leftArmOut) {
                 List<RenderLayer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>>> layers = getLayersList(event.getRenderer());
                 if (layers != null && removedItemLayers.isEmpty()) {
@@ -573,7 +564,6 @@ public class RickPrimeMod {
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
 
-            // Restaurar layers de ítems tras terminar este renderizado
             if (!removedItemLayers.isEmpty()) {
                 List<RenderLayer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>>> layers = getLayersList(event.getRenderer());
                 if (layers != null) {
