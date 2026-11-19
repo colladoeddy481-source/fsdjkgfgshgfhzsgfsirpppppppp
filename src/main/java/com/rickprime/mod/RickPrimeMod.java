@@ -15,6 +15,7 @@ import net.minecraft.client.renderer.RenderType;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.DamageTypeTags;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageTypes;
 import net.minecraft.world.entity.Pose;
@@ -31,6 +32,8 @@ import net.minecraftforge.client.event.RenderLevelStageEvent;
 import net.minecraftforge.client.event.RenderPlayerEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.living.LivingHurtEvent;
+import net.minecraftforge.event.entity.player.AttackEntityEvent;
+import net.minecraftforge.event.entity.player.PlayerInteractEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.lwjgl.glfw.GLFW;
@@ -86,7 +89,7 @@ public class RickPrimeMod {
     private static class BodyState {
         int partsLost = 0;
         boolean isDown = false;
-        boolean isImmobilized = false; // Inmovilizado tras explosión o caída de gran altura
+        boolean isImmobilized = false;
         boolean regenerating = false;
         float originalMaxHealth = 20.0f;
         final List<FallenLimb> fallenLimbs = new ArrayList<>();
@@ -130,7 +133,7 @@ public class RickPrimeMod {
         }
     }
 
-    // ================= Lógica de daño, input y tick =================
+    // ================= Lógica de daño, bloqueo de brazos, input y tick =================
 
     @Mod.EventBusSubscriber(modid = MODID, value = Dist.CLIENT)
     public static class ForgeClientEvents {
@@ -156,7 +159,6 @@ public class RickPrimeMod {
             float currentHealth = player.getHealth();
 
             boolean isExplosion = source.is(DamageTypeTags.IS_EXPLOSION);
-            // Caída de gran altura: daño de caída de 8.0 o más (equivale a ~11 bloques o más de caída)
             boolean isHighFall = (source.is(DamageTypes.FALL) || source.is(DamageTypeTags.IS_FALL)) && damage >= 8.0f;
 
             if (isExplosion || isHighFall) {
@@ -166,7 +168,6 @@ public class RickPrimeMod {
                 return;
             }
 
-            // Daño normal (golpes, flechas, etc.)
             if (currentHealth - damage <= 2.0f) {
                 event.setCanceled(true);
                 player.setHealth(2.0f);
@@ -179,6 +180,82 @@ public class RickPrimeMod {
                 }
             }
         }
+
+        // --- BLOQUEO DE INVENTARIO Y MANOS SEGÚN BRAZO PERDIDO ---
+
+        @SubscribeEvent
+        public static void onRightClickItem(PlayerInteractEvent.RightClickItem event) {
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+
+            if (event.getHand() == InteractionHand.MAIN_HAND && STATE.missing(BodyPart.RIGHT_ARM)) {
+                event.setCanceled(true);
+                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Sin brazo derecho no puedes usar la mano principal!"), true);
+            } else if (event.getHand() == InteractionHand.OFF_HAND && STATE.missing(BodyPart.LEFT_ARM)) {
+                event.setCanceled(true);
+                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Sin brazo izquierdo no puedes usar la mano secundaria!"), true);
+            }
+        }
+
+        @SubscribeEvent
+        public static void onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+
+            if (event.getHand() == InteractionHand.MAIN_HAND && STATE.missing(BodyPart.RIGHT_ARM)) {
+                event.setCanceled(true);
+                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Sin brazo derecho no puedes interactuar ni colocar bloques!"), true);
+            } else if (event.getHand() == InteractionHand.OFF_HAND && STATE.missing(BodyPart.LEFT_ARM)) {
+                event.setCanceled(true);
+                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Sin brazo izquierdo no puedes usar ese objeto!"), true);
+            }
+        }
+
+        @SubscribeEvent
+        public static void onLeftClickBlock(PlayerInteractEvent.LeftClickBlock event) {
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+
+            if (STATE.missing(BodyPart.RIGHT_ARM)) {
+                event.setCanceled(true);
+            }
+        }
+
+        @SubscribeEvent
+        public static void onAttackEntity(AttackEntityEvent event) {
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
+
+            if (STATE.missing(BodyPart.RIGHT_ARM)) {
+                event.setCanceled(true);
+                localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡No tienes brazo derecho para atacar!"), true);
+            }
+        }
+
+        @SubscribeEvent
+        public static void onClickInput(InputEvent.InteractionKeyMappingTriggered event) {
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null) return;
+
+            // Bloquea ataque/minado (clic izquierdo) si falta brazo derecho
+            if (event.isAttack() && STATE.missing(BodyPart.RIGHT_ARM)) {
+                event.setCanceled(true);
+                event.setSwingHand(false);
+            }
+
+            // Bloquea uso (clic derecho) según la mano activa y el brazo faltante
+            if (event.isUseItem()) {
+                if (event.getHand() == InteractionHand.MAIN_HAND && STATE.missing(BodyPart.RIGHT_ARM)) {
+                    event.setCanceled(true);
+                    event.setSwingHand(false);
+                } else if (event.getHand() == InteractionHand.OFF_HAND && STATE.missing(BodyPart.LEFT_ARM)) {
+                    event.setCanceled(true);
+                    event.setSwingHand(false);
+                }
+            }
+        }
+
+        // --- FIN BLOQUEO DE MANOS ---
 
         private static void shatterAllRemainingParts(Player player, boolean isExplosion) {
             while (STATE.partsLost < LOSS_ORDER.length) {
@@ -207,13 +284,11 @@ public class RickPrimeMod {
             Vec3 velocity;
 
             if (flyingOut) {
-                // Impulso fuerte hacia afuera y arriba para salir volando por explosión o caída fuerte
                 double angle = player.getRandom().nextDouble() * Math.PI * 2.0;
                 double horizontalSpeed = 0.45 + player.getRandom().nextDouble() * 0.45;
                 double verticalSpeed = 0.45 + player.getRandom().nextDouble() * 0.35;
                 velocity = new Vec3(Math.cos(angle) * horizontalSpeed, verticalSpeed, Math.sin(angle) * horizontalSpeed);
             } else {
-                // Desprendimiento normal cerca del jugador
                 velocity = new Vec3(
                         (player.getRandom().nextDouble() - 0.5) * 0.18,
                         0.15,
@@ -232,8 +307,8 @@ public class RickPrimeMod {
                 String partName = switch (lost) {
                     case RIGHT_LEG -> "la pierna derecha";
                     case LEFT_LEG -> "la pierna izquierda";
-                    case RIGHT_ARM -> "el brazo derecho";
-                    case LEFT_ARM -> "el brazo izquierdo";
+                    case RIGHT_ARM -> "el brazo derecho (Mano principal bloqueada)";
+                    case LEFT_ARM -> "el brazo izquierdo (Mano secundaria bloqueada)";
                 };
                 player.displayClientMessage(Component.literal("§c[Rick Prime] ¡Perdiste " + partName + "!"), true);
 
@@ -269,7 +344,6 @@ public class RickPrimeMod {
             if (speed != null) speed.removeModifier(SPEED_MODIFIER_ID);
         }
 
-        // Bloquea cualquier intento de caminar, saltar o agacharse mientras está inmóvil
         @SubscribeEvent
         public static void onMovementInput(MovementInputUpdateEvent event) {
             if (STATE.isImmobilized && !STATE.regenerating) {
@@ -308,18 +382,14 @@ public class RickPrimeMod {
             Player player = Minecraft.getInstance().player;
             if (player == null) return;
 
-            // Física simple de vuelo y caída al suelo para las extremidades desprendidas
             for (FallenLimb limb : STATE.fallenLimbs) {
                 if (!limb.returning) {
-                    double groundY = Math.floor(limb.worldPos.y) + 0.1;
-                    // Comprobar si hay bloque sólido debajo
                     if (player.level().getBlockState(net.minecraft.core.BlockPos.containing(limb.worldPos.x, limb.worldPos.y - 0.12, limb.worldPos.z)).isAir()) {
-                        limb.velocity = limb.velocity.add(0, -0.05, 0); // Gravedad
+                        limb.velocity = limb.velocity.add(0, -0.05, 0);
                         limb.worldPos = limb.worldPos.add(limb.velocity);
                         limb.yaw += limb.spinYaw;
                         limb.pitch += limb.spinPitch;
                     } else {
-                        // Al tocar el suelo se detiene y queda acostada
                         limb.velocity = Vec3.ZERO;
                         limb.spinYaw = 0f;
                         limb.spinPitch = 0f;
