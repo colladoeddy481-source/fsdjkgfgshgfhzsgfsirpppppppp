@@ -7,19 +7,20 @@ import com.mojang.math.Axis;
 import net.minecraft.client.Camera;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.model.PlayerModel;
 import net.minecraft.client.model.geom.ModelLayers;
 import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
+import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.renderer.entity.LivingEntityRenderer;
 import net.minecraft.client.renderer.entity.layers.ItemInHandLayer;
 import net.minecraft.client.renderer.entity.layers.RenderLayer;
-import net.minecraft.core.BlockPos;
+import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.DamageTypeTags;
 import net.minecraft.world.InteractionHand;
@@ -38,19 +39,16 @@ import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.food.FoodData;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.InputEvent;
 import net.minecraftforge.client.event.MovementInputUpdateEvent;
-import net.minecraftforge.client.event.RegisterGuiOverlaysEvent;
 import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
-import net.minecraftforge.client.event.RenderGuiOverlayEvent;
 import net.minecraftforge.client.event.RenderHandEvent;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
 import net.minecraftforge.client.event.RenderPlayerEvent;
-import net.minecraftforge.client.gui.overlay.ForgeGui;
-import net.minecraftforge.client.gui.overlay.VanillaGuiOverlay;
+import net.minecraftforge.client.event.RegisterGuiOverlaysEvent;
+import net.minecraftforge.client.gui.overlay.IGuiOverlay;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.living.LivingAttackEvent;
 import net.minecraftforge.event.entity.living.LivingChangeTargetEvent;
@@ -74,10 +72,6 @@ import java.util.UUID;
 @Mod(RickPrimeMod.MODID)
 public class RickPrimeMod {
     public static final String MODID = "rickprime";
-
-    // 20 ticks/s: 2 min activa = 2400 ticks | 3 min recarga = 3600 ticks
-    public static final int EVADE_ACTIVE_TICKS = 2400;
-    public static final int EVADE_RECHARGE_TICKS = 3600;
 
     public RickPrimeMod() {
     }
@@ -126,30 +120,12 @@ public class RickPrimeMod {
         float originalMaxHealth = 20.0f;
         int orangeShieldCooldownTicks = 0;
         static final int SHIELD_IDLE_TIMEOUT_TICKS = 40;
-
-        boolean evadeActive = false;
-        int evadeRemainingTicks = EVADE_ACTIVE_TICKS;
-        int evadeRechargeTicksRemaining = 0;
-        int dodgeFlashTicks = 0;
-        Vec3 lastTeleportFrom = null;
-        Vec3 lastTeleportTo = null;
-
         final List<FallenLimb> fallenLimbs = new ArrayList<>();
 
-        float evadeChargeRatio() {
-            if (evadeActive) {
-                return Math.max(0.0f, Math.min(1.0f, evadeRemainingTicks / (float) EVADE_ACTIVE_TICKS));
-            }
-            if (evadeRechargeTicksRemaining > 0) {
-                float chargedTicks = EVADE_RECHARGE_TICKS - evadeRechargeTicksRemaining;
-                return Math.max(0.0f, Math.min(1.0f, chargedTicks / (float) EVADE_RECHARGE_TICKS));
-            }
-            return 1.0f;
-        }
-
-        boolean canActivateEvade() {
-            return !evadeActive && evadeRechargeTicksRemaining <= 0 && evadeRemainingTicks > 0;
-        }
+        // Evasión (teletransporte): barra que carga en 3 min, activa dura 2 min.
+        int evasionChargeTicks = 0;
+        boolean evasionActive = false;
+        int evasionActiveTicksLeft = 0;
 
         boolean missing(BodyPart part) {
             for (int i = 0; i < partsLost; i++) {
@@ -191,6 +167,36 @@ public class RickPrimeMod {
     private static final AttributeModifier IMMOBILE_SPEED_MOD =
             new AttributeModifier(SPEED_MODIFIER_ID, "rickprime.immobile_speed", -1.0, AttributeModifier.Operation.MULTIPLY_TOTAL);
 
+    private static final int EVASION_FULL_CHARGE_TICKS = 3 * 60 * 20; // 3 minutos para cargar
+    private static final int EVASION_DURATION_TICKS = 2 * 60 * 20;    // 2 minutos activa
+
+    private static final IGuiOverlay EVASION_BAR_OVERLAY = (gui, guiGraphics, partialTick, width, height) ->
+            renderEvasionBar(guiGraphics, width, height);
+
+    private static void renderEvasionBar(GuiGraphics guiGraphics, int width, int height) {
+        int barWidth = 100;
+        int barHeight = 4;
+        int x = width / 2 - barWidth / 2;
+        int y = height - 54;
+
+        float pct;
+        int color;
+        if (STATE.evasionActive) {
+            pct = STATE.evasionActiveTicksLeft / (float) EVASION_DURATION_TICKS;
+            color = 0xFF40E0FF; // celeste: evasión activa
+        } else {
+            pct = STATE.evasionChargeTicks / (float) EVASION_FULL_CHARGE_TICKS;
+            color = 0xFF2266DD; // azul: cargando
+        }
+        pct = Math.max(0f, Math.min(1f, pct));
+
+        guiGraphics.fill(x - 1, y - 1, x + barWidth + 1, y + barHeight + 1, 0x80000000);
+        int filled = (int) (barWidth * pct);
+        if (filled > 0) {
+            guiGraphics.fill(x, y, x + filled, y + barHeight, color);
+        }
+    }
+
     @Mod.EventBusSubscriber(modid = MODID, bus = Mod.EventBusSubscriber.Bus.MOD, value = Dist.CLIENT)
     public static class ClientModEvents {
         public static final KeyMapping REGEN_KEY = new KeyMapping(
@@ -214,8 +220,8 @@ public class RickPrimeMod {
         }
 
         @SubscribeEvent
-        public static void registerGuiOverlays(RegisterGuiOverlaysEvent event) {
-            event.registerAbove(VanillaGuiOverlay.FOOD_LEVEL.id(), "evade_bar", ForgeClientEvents::renderEvadeBar);
+        public static void registerOverlays(RegisterGuiOverlaysEvent event) {
+            event.registerAboveAll("rickprime_evasion_bar", EVASION_BAR_OVERLAY);
         }
     }
 
@@ -227,6 +233,15 @@ public class RickPrimeMod {
             return player != null && entity.getId() == player.getId();
         }
 
+        /**
+         * La vida/hambre son autoritativas del SERVIDOR. En singleplayer, el cliente
+         * y el servidor integrado son dos objetos Java distintos aunque representen
+         * al mismo jugador: mutar solo el del cliente causa que la vida "no coincida"
+         * (el servidor sigue enviando su propio valor real) y, en algunos casos, que
+         * el jugador muera de verdad porque el servidor nunca se enteró del clamp.
+         * Esta función busca al jugador REAL del servidor integrado para que los
+         * cambios de vida/absorción se apliquen donde de verdad importan.
+         */
         private static Player resolveAuthoritative(Player fallback) {
             var integratedServer = Minecraft.getInstance().getSingleplayerServer();
             if (integratedServer != null) {
@@ -257,78 +272,6 @@ public class RickPrimeMod {
             applyMovementPenalty(player);
         }
 
-        private static void teleportEvade(Player player, DamageSource source) {
-            Player authPlayer = resolveAuthoritative(player);
-            Level level = authPlayer.level();
-            Vec3 origin = authPlayer.position();
-            Random rand = authPlayer.getRandom();
-
-            double baseAngle = rand.nextDouble() * Math.PI * 2.0;
-            Entity attacker = source.getEntity();
-            if (attacker != null) {
-                double dx = authPlayer.getX() - attacker.getX();
-                double dz = authPlayer.getZ() - attacker.getZ();
-                double awayAngle = Math.atan2(dz, dx);
-                baseAngle = awayAngle + (rand.nextBoolean() ? Math.PI * 0.5 : -Math.PI * 0.5);
-            }
-
-            Vec3 chosen = null;
-            for (int attempt = 0; attempt < 16; attempt++) {
-                double angle = baseAngle + (attempt * 0.45);
-                double dist = 3.0 + rand.nextDouble() * 3.0;
-                double tx = origin.x + Math.cos(angle) * dist;
-                double tz = origin.z + Math.sin(angle) * dist;
-
-                int baseY = (int) Math.floor(origin.y);
-                for (int dy = 2; dy >= -3; dy--) {
-                    int y = baseY + dy;
-                    BlockPos feet = BlockPos.containing(tx, y, tz);
-                    BlockPos head = feet.above();
-                    BlockPos below = feet.below();
-
-                    if (level.getBlockState(feet).isAir()
-                            && level.getBlockState(head).isAir()
-                            && !level.getBlockState(below).isAir()) {
-                        chosen = new Vec3(tx + 0.5, y, tz + 0.5);
-                        break;
-                    }
-                }
-                if (chosen != null) break;
-            }
-
-            if (chosen == null) {
-                chosen = origin.add(
-                        Math.cos(baseAngle) * 3.5,
-                        0.0,
-                        Math.sin(baseAngle) * 3.5
-                );
-            }
-
-            STATE.lastTeleportFrom = origin;
-            STATE.lastTeleportTo = chosen;
-            STATE.dodgeFlashTicks = 10;
-
-            authPlayer.teleportTo(chosen.x, chosen.y, chosen.z);
-            authPlayer.setDeltaMovement(Vec3.ZERO);
-            authPlayer.fallDistance = 0.0f;
-
-            if (player.getId() != authPlayer.getId()) {
-                player.teleportTo(chosen.x, chosen.y, chosen.z);
-                player.setDeltaMovement(Vec3.ZERO);
-                player.fallDistance = 0.0f;
-            }
-
-            player.displayClientMessage(Component.literal("§b[Rick Prime] ¡Esquivado!"), true);
-        }
-
-        private static boolean tryEvadeIncomingAttack(Player player, DamageSource source) {
-            if (!STATE.evadeActive || STATE.evadeRemainingTicks <= 0) return false;
-            if (isArrowSource(source)) return false;
-
-            teleportEvade(player, source);
-            return true;
-        }
-
         private static boolean shouldMobStopAttacking(Entity attacker, Player player) {
             if (attacker == null || player == null) return false;
             if (attacker.getId() == player.getId()) return false;
@@ -345,7 +288,7 @@ public class RickPrimeMod {
         @SubscribeEvent(priority = EventPriority.HIGHEST)
         public static void onLivingDeath(LivingDeathEvent event) {
             if (!isLocalPlayer(event.getEntity())) return;
-            Player player = (Player) event.getEntity();
+            Player player = (Player) event.getEntity(); // el jugador real que está muriendo, no el del cliente
 
             event.setCanceled(true);
             clampPlayerToOneHeart(player);
@@ -365,19 +308,20 @@ public class RickPrimeMod {
             }
         }
 
-        @SubscribeEvent(priority = EventPriority.HIGH)
+        @SubscribeEvent
         public static void onLivingAttack(LivingAttackEvent event) {
             if (!isLocalPlayer(event.getEntity())) return;
             Player player = (Player) event.getEntity();
 
-            if (isArrowSource(event.getSource())) {
+            if (STATE.evasionActive) {
                 event.setCanceled(true);
-                refreshOrangeShield(player);
+                performEvasionTeleport(player);
                 return;
             }
 
-            if (tryEvadeIncomingAttack(player, event.getSource())) {
+            if (isArrowSource(event.getSource())) {
                 event.setCanceled(true);
+                refreshOrangeShield(player);
                 return;
             }
 
@@ -397,14 +341,14 @@ public class RickPrimeMod {
             if (!isLocalPlayer(event.getEntity())) return;
             Player player = (Player) event.getEntity();
 
-            if (isArrowSource(event.getSource())) {
+            if (STATE.evasionActive) {
                 event.setCanceled(true);
-                refreshOrangeShield(player);
                 return;
             }
 
-            if (tryEvadeIncomingAttack(player, event.getSource())) {
+            if (isArrowSource(event.getSource())) {
                 event.setCanceled(true);
+                refreshOrangeShield(player);
                 return;
             }
 
@@ -588,7 +532,8 @@ public class RickPrimeMod {
         @SubscribeEvent
         public static void onRightClickItem(PlayerInteractEvent.RightClickItem event) {
             if (!isLocalPlayer(event.getEntity())) return;
-            Player localPlayer = (Player) event.getEntity();
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null) return;
 
             if (event.getHand() == InteractionHand.MAIN_HAND && STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
@@ -602,7 +547,8 @@ public class RickPrimeMod {
         @SubscribeEvent
         public static void onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
             if (!isLocalPlayer(event.getEntity())) return;
-            Player localPlayer = (Player) event.getEntity();
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null) return;
 
             if (event.getHand() == InteractionHand.MAIN_HAND && STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
@@ -624,7 +570,8 @@ public class RickPrimeMod {
         @SubscribeEvent
         public static void onAttackEntity(AttackEntityEvent event) {
             if (!isLocalPlayer(event.getEntity())) return;
-            Player localPlayer = (Player) event.getEntity();
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null) return;
 
             if (STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
@@ -719,6 +666,40 @@ public class RickPrimeMod {
             if (speed != null) speed.removeModifier(SPEED_MODIFIER_ID);
         }
 
+        // ---------- Evasión: teletransporte corto al recibir un ataque ----------
+
+        private static void performEvasionTeleport(Player clientPlayer) {
+            Player real = resolveAuthoritative(clientPlayer);
+            Vec3 oldPos = real.position();
+
+            double angle = real.getRandom().nextDouble() * Math.PI * 2.0;
+            double dist = 4.0 + real.getRandom().nextDouble() * 2.0;
+            double nx = oldPos.x + Math.cos(angle) * dist;
+            double nz = oldPos.z + Math.sin(angle) * dist;
+            double ny = oldPos.y;
+
+            spawnTeleportParticles(real, oldPos.x, oldPos.y + 1.0, oldPos.z);
+            real.teleportTo(nx, ny, nz);
+            spawnTeleportParticles(real, nx, ny + 1.0, nz);
+
+            real.displayClientMessage(Component.literal("§b[Rick Prime] ¡Evasión!"), true);
+        }
+
+        private static void spawnTeleportParticles(Player player, double x, double y, double z) {
+            // Estela/destello celeste, sin clon: solo un estallido de partículas en el punto de salida y de llegada.
+            if (player.level() instanceof ServerLevel serverLevel) {
+                serverLevel.sendParticles(ParticleTypes.END_ROD, x, y, z, 30, 0.3, 0.6, 0.3, 0.02);
+            } else {
+                for (int i = 0; i < 12; i++) {
+                    player.level().addParticle(ParticleTypes.END_ROD,
+                            x + (player.getRandom().nextDouble() - 0.5) * 0.6,
+                            y + (player.getRandom().nextDouble() - 0.5) * 0.6,
+                            z + (player.getRandom().nextDouble() - 0.5) * 0.6,
+                            0, 0.05, 0);
+                }
+            }
+        }
+
         @SubscribeEvent
         public static void onMovementInput(MovementInputUpdateEvent event) {
             if (STATE.isImmobilized && !STATE.regenerating) {
@@ -734,25 +715,23 @@ public class RickPrimeMod {
             Player player = Minecraft.getInstance().player;
             if (player == null) return;
 
-            if (ClientModEvents.EVADE_KEY.consumeClick()) {
-                if (STATE.canActivateEvade()) {
-                    STATE.evadeActive = true;
-                    STATE.evadeRemainingTicks = EVADE_ACTIVE_TICKS;
-                    player.displayClientMessage(Component.literal(
-                            "§b[Rick Prime] ¡Evasión por teletransporte activada por 2 minutos!"), true);
-                } else if (STATE.evadeActive) {
-                    player.displayClientMessage(Component.literal(
-                            "§e[Rick Prime] Tu evasión ya está activa."), true);
-                } else {
-                    int segs = (int) Math.ceil(STATE.evadeRechargeTicksRemaining / 20.0);
-                    player.displayClientMessage(Component.literal(
-                            "§c[Rick Prime] Barra de evasión cargando (" + segs + "s restantes para 100%)."), true);
+            if (ClientModEvents.REGEN_KEY.consumeClick()) {
+                boolean nothingToRegen = STATE.partsLost == 0 && !STATE.isDown && STATE.healthLostAccumulated <= 0.0f;
+                if (!nothingToRegen && !STATE.regenerating) {
+                    startRegeneration(player);
                 }
             }
 
-            if (ClientModEvents.REGEN_KEY.consumeClick()) {
-                if ((STATE.partsLost == 0 && !STATE.isDown && STATE.healthLostAccumulated <= 0.0f) || STATE.regenerating) return;
-                startRegeneration(player);
+            if (ClientModEvents.EVADE_KEY.consumeClick()) {
+                if (!STATE.evasionActive && STATE.evasionChargeTicks >= EVASION_FULL_CHARGE_TICKS) {
+                    STATE.evasionActive = true;
+                    STATE.evasionActiveTicksLeft = EVASION_DURATION_TICKS;
+                    STATE.evasionChargeTicks = 0;
+                    player.displayClientMessage(Component.literal(
+                            "§b[Rick Prime] ¡Evasión activada! Esquivarás ataques por 2 minutos."), true);
+                } else if (!STATE.evasionActive) {
+                    player.displayClientMessage(Component.literal("§7[Rick Prime] La evasión aún no está cargada."), true);
+                }
             }
         }
 
@@ -772,31 +751,6 @@ public class RickPrimeMod {
             Player player = Minecraft.getInstance().player;
             if (player == null) return;
 
-            if (STATE.dodgeFlashTicks > 0) {
-                STATE.dodgeFlashTicks--;
-            }
-
-            if (STATE.evadeActive) {
-                if (STATE.evadeRemainingTicks > 0) {
-                    STATE.evadeRemainingTicks--;
-                }
-                if (STATE.evadeRemainingTicks <= 0) {
-                    STATE.evadeActive = false;
-                    STATE.evadeRemainingTicks = 0;
-                    STATE.evadeRechargeTicksRemaining = EVADE_RECHARGE_TICKS;
-                    player.displayClientMessage(Component.literal(
-                            "§e[Rick Prime] Evasión finalizada. La barra tardará 3 minutos en cargarse."), true);
-                }
-            } else if (STATE.evadeRechargeTicksRemaining > 0) {
-                STATE.evadeRechargeTicksRemaining--;
-                if (STATE.evadeRechargeTicksRemaining <= 0) {
-                    STATE.evadeRechargeTicksRemaining = 0;
-                    STATE.evadeRemainingTicks = EVADE_ACTIVE_TICKS;
-                    player.displayClientMessage(Component.literal(
-                            "§b[Rick Prime] ¡Barra de evasión llena (100%)! Presiona 'V' para usarla."), true);
-                }
-            }
-
             if (STATE.orangeShieldCooldownTicks > 0) {
                 STATE.orangeShieldCooldownTicks--;
                 if (STATE.orangeShieldCooldownTicks == 0) {
@@ -804,9 +758,25 @@ public class RickPrimeMod {
                 }
             }
 
+            if (STATE.evasionActive) {
+                STATE.evasionActiveTicksLeft--;
+                if (STATE.evasionActiveTicksLeft <= 0) {
+                    STATE.evasionActive = false;
+                    player.displayClientMessage(Component.literal("§7[Rick Prime] Evasión terminada."), true);
+                }
+            }
+            if (STATE.evasionChargeTicks < EVASION_FULL_CHARGE_TICKS) {
+                STATE.evasionChargeTicks++;
+            }
+
+            // (Se quitó el clamp de vida que había aquí: corría cada tick sobre el
+            // jugador del CLIENTE y peleaba contra el valor real que manda el servidor
+            // integrado, causando que "la vida no coincida". El clamp real ya ocurre
+            // en onPlayerHurt/onLivingDeath sobre el jugador correcto (event.getEntity()).)
+
             for (FallenLimb limb : STATE.fallenLimbs) {
                 if (!limb.returning) {
-                    if (player.level().getBlockState(BlockPos.containing(limb.worldPos.x, limb.worldPos.y - 0.12, limb.worldPos.z)).isAir()) {
+                    if (player.level().getBlockState(net.minecraft.core.BlockPos.containing(limb.worldPos.x, limb.worldPos.y - 0.12, limb.worldPos.z)).isAir()) {
                         limb.velocity = limb.velocity.add(0, -0.05, 0);
                         limb.worldPos = limb.worldPos.add(limb.velocity);
                         limb.yaw += limb.spinYaw;
@@ -861,46 +831,6 @@ public class RickPrimeMod {
             player.setPose(Pose.STANDING);
             clearMovementPenalty(player);
             player.displayClientMessage(Component.literal("§a[Rick Prime] ¡Te has regenerado al 100%!"), true);
-        }
-
-        public static void renderEvadeBar(ForgeGui gui, GuiGraphics guiGraphics, float partialTick,
-                                          int screenWidth, int screenHeight) {
-            Minecraft mc = Minecraft.getInstance();
-            if (mc.player == null || mc.options.hideGui) return;
-
-            int barWidth = 100;
-            int barHeight = 7;
-            int x = (screenWidth / 2) - (barWidth / 2);
-            int y = screenHeight - 52;
-
-            float ratio = STATE.evadeChargeRatio();
-            int fillWidth = Math.round(barWidth * ratio);
-
-            guiGraphics.fill(x - 1, y - 1, x + barWidth + 1, y + barHeight + 1, 0xCC000000);
-            guiGraphics.fill(x, y, x + barWidth, y + barHeight, 0xFF22252A);
-
-            int fillColor = STATE.evadeActive ? 0xFF00D8FF : (STATE.evadeRechargeTicksRemaining > 0 ? 0xFF3B82F6 : 0xFF22E584);
-            if (fillWidth > 0) {
-                guiGraphics.fill(x, y, x + fillWidth, y + barHeight, fillColor);
-            }
-
-            String label;
-            if (STATE.evadeActive) {
-                int secs = (int) Math.ceil(STATE.evadeRemainingTicks / 20.0);
-                label = "EVASIÓN ACTIVA [V]: " + secs + "s";
-            } else if (STATE.evadeRechargeTicksRemaining > 0) {
-                int secs = (int) Math.ceil(STATE.evadeRechargeTicksRemaining / 20.0);
-                label = "CARGANDO EVASIÓN: " + secs + "s";
-            } else {
-                label = "EVASIÓN LISTA [V] (2m)";
-            }
-
-            int textX = (screenWidth / 2) - (mc.font.width(label) / 2);
-            guiGraphics.drawString(mc.font, label, textX, y - 10, 0xFFFFFF, true);
-        }
-
-        @SubscribeEvent
-        public static void onRenderGuiOverlay(RenderGuiOverlayEvent.Post event) {
         }
     }
 
@@ -1027,15 +957,6 @@ public class RickPrimeMod {
                 renderOrangeCircularShield(player, poseStack, bufferSource, camPos, event.getPartialTick());
             }
 
-            if (player != null && STATE.dodgeFlashTicks > 0) {
-                if (STATE.lastTeleportFrom != null) {
-                    renderTeleportFlash(STATE.lastTeleportFrom, poseStack, bufferSource, camPos);
-                }
-                if (STATE.lastTeleportTo != null) {
-                    renderTeleportFlash(STATE.lastTeleportTo, poseStack, bufferSource, camPos);
-                }
-            }
-
             if (!STATE.fallenLimbs.isEmpty()) {
                 if (model == null) {
                     model = new PlayerModel<>(mc.getEntityModels().bakeLayer(ModelLayers.PLAYER), false);
@@ -1050,36 +971,7 @@ public class RickPrimeMod {
             bufferSource.endBatch();
         }
 
-        private static void renderTeleportFlash(Vec3 pos, PoseStack poseStack,
-                                                MultiBufferSource.BufferSource bufferSource,
-                                                Vec3 camPos) {
-            float alpha = Math.min(0.65f, (STATE.dodgeFlashTicks / 10.0f) * 0.7f);
-            float radius = 0.55f + (1.0f - (STATE.dodgeFlashTicks / 10.0f)) * 0.85f;
-
-            poseStack.pushPose();
-            poseStack.translate(pos.x - camPos.x, pos.y + 1.0 - camPos.y, pos.z - camPos.z);
-            Matrix4f mat = poseStack.last().pose();
-            VertexConsumer consumer = bufferSource.getBuffer(RenderType.translucent());
-
-            int segments = 24;
-            for (int i = 0; i < segments; i++) {
-                double a1 = (2.0 * Math.PI * i) / segments;
-                double a2 = (2.0 * Math.PI * (i + 1)) / segments;
-
-                float x1 = (float) (Math.cos(a1) * radius);
-                float z1 = (float) (Math.sin(a1) * radius);
-                float x2 = (float) (Math.cos(a2) * radius);
-                float z2 = (float) (Math.sin(a2) * radius);
-
-                consumer.vertex(mat, x1, -0.65f, z1).color(0.2f, 0.85f, 1.0f, alpha).uv(0, 0).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
-                consumer.vertex(mat, x2, -0.65f, z2).color(0.2f, 0.85f, 1.0f, alpha).uv(1, 0).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
-                consumer.vertex(mat, x2, 0.65f, z2).color(0.2f, 0.85f, 1.0f, alpha).uv(1, 1).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
-                consumer.vertex(mat, x1, 0.65f, z1).color(0.2f, 0.85f, 1.0f, alpha).uv(0, 1).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
-            }
-
-            poseStack.popPose();
-        }
-
+        // Esfera 3D de color naranja que rodea completamente al jugador
         private static void renderOrangeCircularShield(Player player, PoseStack poseStack,
                                                        MultiBufferSource.BufferSource bufferSource,
                                                        Vec3 camPos, float partialTick) {
