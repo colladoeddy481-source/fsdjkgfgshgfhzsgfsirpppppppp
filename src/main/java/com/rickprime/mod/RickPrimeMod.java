@@ -7,16 +7,17 @@ import com.mojang.math.Axis;
 import net.minecraft.client.Camera;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.model.PlayerModel;
 import net.minecraft.client.model.geom.ModelLayers;
 import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
-import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.renderer.entity.LivingEntityRenderer;
 import net.minecraft.client.renderer.entity.layers.ItemInHandLayer;
 import net.minecraft.client.renderer.entity.layers.RenderLayer;
+import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
@@ -24,7 +25,6 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.DamageTypeTags;
-import net.minecraft.tags.FluidTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageTypes;
@@ -41,16 +41,15 @@ import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.food.FoodData;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.InputEvent;
 import net.minecraftforge.client.event.MovementInputUpdateEvent;
+import net.minecraftforge.client.event.RegisterGuiOverlaysEvent;
 import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
 import net.minecraftforge.client.event.RenderHandEvent;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
 import net.minecraftforge.client.event.RenderPlayerEvent;
-import net.minecraftforge.client.event.RegisterGuiOverlaysEvent;
 import net.minecraftforge.client.gui.overlay.IGuiOverlay;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.living.LivingAttackEvent;
@@ -68,6 +67,7 @@ import org.lwjgl.glfw.GLFW;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Random;
 import java.util.UUID;
@@ -75,6 +75,14 @@ import java.util.UUID;
 @Mod(RickPrimeMod.MODID)
 public class RickPrimeMod {
     public static final String MODID = "rickprime";
+
+    private static final ResourceLocation DEFAULT_STEVE_SKIN = new ResourceLocation("textures/entity/steve.png");
+
+    private static final int MAX_DRONES = 10;
+    private static final int DRONES_PER_SUMMON = 3;
+    private static final int DRONE_COOLDOWN_TICKS = 15 * 20;
+    private static final int DRONE_LIFETIME_TICKS = 12 * 20;
+    private static final float DRONE_UNIFORM_SCALE = 1.0f;
 
     public RickPrimeMod() {
     }
@@ -95,7 +103,7 @@ public class RickPrimeMod {
         float pitch;
         float spinYaw;
         float spinPitch;
-        final ResourceLocation skin;
+        ResourceLocation skin;
 
         boolean returning = false;
         Vec3 returnStartPos;
@@ -110,7 +118,21 @@ public class RickPrimeMod {
             this.pitch = 90f;
             this.spinYaw = 0f;
             this.spinPitch = 0f;
-            this.skin = skin;
+            this.skin = skin != null ? skin : DEFAULT_STEVE_SKIN;
+        }
+    }
+
+    private static class PrimeDrone {
+        Vec3 pos;
+        float yaw;
+        final float orbitAngle;
+        int ageTicks = 0;
+        int attackCooldown = 0;
+
+        PrimeDrone(Vec3 pos, float yaw, float orbitAngle) {
+            this.pos = pos;
+            this.yaw = yaw;
+            this.orbitAngle = orbitAngle;
         }
     }
 
@@ -124,8 +146,11 @@ public class RickPrimeMod {
         int orangeShieldCooldownTicks = 0;
         static final int SHIELD_IDLE_TIMEOUT_TICKS = 40;
         final List<FallenLimb> fallenLimbs = new ArrayList<>();
+        final List<PrimeDrone> activeDrones = new ArrayList<>();
 
-        // Evasión (teletransporte): barra que carga en 3 min, activa dura 2 min.
+        int droneCooldownTicksLeft = 0;
+
+        // Evasión (teletransporte): barra que carga en 3 min, activa dura 1 min.
         int evasionChargeTicks = 0;
         boolean evasionActive = false;
         int evasionActiveTicksLeft = 0;
@@ -171,33 +196,51 @@ public class RickPrimeMod {
     private static final AttributeModifier IMMOBILE_SPEED_MOD =
             new AttributeModifier(SPEED_MODIFIER_ID, "rickprime.immobile_speed", -1.0, AttributeModifier.Operation.MULTIPLY_TOTAL);
 
-    private static final int EVASION_FULL_CHARGE_TICKS = 3 * 60 * 20; // 3 minutos para cargar
-    private static final int EVASION_DURATION_TICKS = 1 * 60 * 20;    // 1 minuto activa
+    private static final int EVASION_FULL_CHARGE_TICKS = 3 * 60 * 20;
+    private static final int EVASION_DURATION_TICKS = 1 * 60 * 20;
 
     private static final IGuiOverlay EVASION_BAR_OVERLAY = (gui, guiGraphics, partialTick, width, height) ->
-            renderEvasionBar(guiGraphics, width, height);
+            renderHudBars(guiGraphics, width, height);
 
-    private static void renderEvasionBar(GuiGraphics guiGraphics, int width, int height) {
+    private static void renderHudBars(GuiGraphics guiGraphics, int width, int height) {
         int barWidth = 100;
         int barHeight = 4;
         int x = width / 2 - barWidth / 2;
-        int y = height - 54;
 
-        float pct;
-        int color;
+        int evasionY = height - 54;
+        float evasionPct;
+        int evasionColor;
         if (STATE.evasionActive) {
-            pct = STATE.evasionActiveTicksLeft / (float) EVASION_DURATION_TICKS;
-            color = 0xFF40E0FF; // celeste: evasión activa
+            evasionPct = STATE.evasionActiveTicksLeft / (float) EVASION_DURATION_TICKS;
+            evasionColor = 0xFF40E0FF;
         } else {
-            pct = STATE.evasionChargeTicks / (float) EVASION_FULL_CHARGE_TICKS;
-            color = 0xFF2266DD; // azul: cargando
+            evasionPct = STATE.evasionChargeTicks / (float) EVASION_FULL_CHARGE_TICKS;
+            evasionColor = 0xFF2266DD;
         }
-        pct = Math.max(0f, Math.min(1f, pct));
+        evasionPct = Math.max(0f, Math.min(1f, evasionPct));
 
-        guiGraphics.fill(x - 1, y - 1, x + barWidth + 1, y + barHeight + 1, 0x80000000);
-        int filled = (int) (barWidth * pct);
-        if (filled > 0) {
-            guiGraphics.fill(x, y, x + filled, y + barHeight, color);
+        guiGraphics.fill(x - 1, evasionY - 1, x + barWidth + 1, evasionY + barHeight + 1, 0x80000000);
+        int evasionFilled = (int) (barWidth * evasionPct);
+        if (evasionFilled > 0) {
+            guiGraphics.fill(x, evasionY, x + evasionFilled, evasionY + barHeight, evasionColor);
+        }
+
+        int droneY = height - 62;
+        float droneReadyPct;
+        int droneColor;
+        if (STATE.droneCooldownTicksLeft > 0) {
+            droneReadyPct = 1.0f - (STATE.droneCooldownTicksLeft / (float) DRONE_COOLDOWN_TICKS);
+            droneColor = 0xFFFFAA00;
+        } else {
+            droneReadyPct = 1.0f;
+            droneColor = 0xFF33EE88;
+        }
+        droneReadyPct = Math.max(0f, Math.min(1f, droneReadyPct));
+
+        guiGraphics.fill(x - 1, droneY - 1, x + barWidth + 1, droneY + barHeight + 1, 0x80000000);
+        int droneFilled = (int) (barWidth * droneReadyPct);
+        if (droneFilled > 0) {
+            guiGraphics.fill(x, droneY, x + droneFilled, droneY + barHeight, droneColor);
         }
     }
 
@@ -217,10 +260,18 @@ public class RickPrimeMod {
                 "key.categories.rickprime"
         );
 
+        public static final KeyMapping SUMMON_DRONES_KEY = new KeyMapping(
+                "key.rickprime.summon_drones",
+                InputConstants.Type.KEYSYM,
+                GLFW.GLFW_KEY_G,
+                "key.categories.rickprime"
+        );
+
         @SubscribeEvent
         public static void registerKeyMappings(RegisterKeyMappingsEvent event) {
             event.register(REGEN_KEY);
             event.register(EVADE_KEY);
+            event.register(SUMMON_DRONES_KEY);
         }
 
         @SubscribeEvent
@@ -237,15 +288,6 @@ public class RickPrimeMod {
             return player != null && entity.getId() == player.getId();
         }
 
-        /**
-         * La vida/hambre son autoritativas del SERVIDOR. En singleplayer, el cliente
-         * y el servidor integrado son dos objetos Java distintos aunque representen
-         * al mismo jugador: mutar solo el del cliente causa que la vida "no coincida"
-         * (el servidor sigue enviando su propio valor real) y, en algunos casos, que
-         * el jugador muera de verdad porque el servidor nunca se enteró del clamp.
-         * Esta función busca al jugador REAL del servidor integrado para que los
-         * cambios de vida/absorción se apliquen donde de verdad importan.
-         */
         private static Player resolveAuthoritative(Player fallback) {
             var integratedServer = Minecraft.getInstance().getSingleplayerServer();
             if (integratedServer != null) {
@@ -253,6 +295,111 @@ public class RickPrimeMod {
                 if (real != null) return real;
             }
             return fallback;
+        }
+
+        private static ResourceLocation resolvePlayerSkin(Player player) {
+            if (player instanceof AbstractClientPlayer acp) {
+                ResourceLocation loc = acp.getSkinTextureLocation();
+                if (loc != null) return loc;
+            }
+            Player local = Minecraft.getInstance().player;
+            if (local instanceof AbstractClientPlayer localAcp && localAcp.getSkinTextureLocation() != null) {
+                return localAcp.getSkinTextureLocation();
+            }
+            return DEFAULT_STEVE_SKIN;
+        }
+
+        private static void refreshFallenLimbSkins(Player player) {
+            ResourceLocation skin = resolvePlayerSkin(player);
+            for (FallenLimb limb : STATE.fallenLimbs) {
+                if (limb.skin == null || limb.skin.equals(DEFAULT_STEVE_SKIN)) {
+                    limb.skin = skin;
+                }
+            }
+        }
+
+        private static void summonDrones(Player clientPlayer) {
+            if (STATE.droneCooldownTicksLeft > 0) {
+                float secondsLeft = STATE.droneCooldownTicksLeft / 20.0f;
+                clientPlayer.displayClientMessage(Component.literal(
+                        "§e[Rick Prime] Espera " + String.format("%.1f", secondsLeft) + "s para invocar robots."), true);
+                return;
+            }
+
+            int availableSlots = MAX_DRONES - STATE.activeDrones.size();
+            if (availableSlots <= 0) {
+                clientPlayer.displayClientMessage(Component.literal(
+                        "§c[Rick Prime] Ya alcanzaste el límite de " + MAX_DRONES + " robots activos."), true);
+                return;
+            }
+
+            int toSpawn = Math.min(DRONES_PER_SUMMON, availableSlots);
+            for (int i = 0; i < toSpawn; i++) {
+                float angle = (float) ((Math.PI * 2.0 * (STATE.activeDrones.size() + 1)) / MAX_DRONES);
+                Vec3 spawnPos = clientPlayer.position().add(Math.cos(angle) * 1.6, 1.5, Math.sin(angle) * 1.6);
+                STATE.activeDrones.add(new PrimeDrone(spawnPos, clientPlayer.getYRot(), angle));
+                spawnTeleportParticles(clientPlayer, spawnPos.x, spawnPos.y, spawnPos.z);
+            }
+
+            STATE.droneCooldownTicksLeft = DRONE_COOLDOWN_TICKS;
+            clientPlayer.displayClientMessage(Component.literal(
+                    "§a[Rick Prime] ¡Invocaste " + toSpawn + " robot(s)! (" + STATE.activeDrones.size() + "/" + MAX_DRONES + " activos)"), true);
+        }
+
+        private static void updateDrones(Player clientPlayer) {
+            if (STATE.activeDrones.isEmpty()) return;
+
+            Player realPlayer = resolveAuthoritative(clientPlayer);
+            List<LivingEntity> nearbyHostiles = realPlayer.level().getEntitiesOfClass(
+                    LivingEntity.class,
+                    realPlayer.getBoundingBox().inflate(10.0),
+                    e -> e != null
+                            && e.isAlive()
+                            && e.getId() != realPlayer.getId()
+                            && !(e instanceof Player)
+                            && e instanceof Mob
+            );
+            nearbyHostiles.sort(Comparator.comparingDouble(e -> e.distanceToSqr(realPlayer)));
+            LivingEntity nearestTarget = nearbyHostiles.isEmpty() ? null : nearbyHostiles.get(0);
+
+            List<PrimeDrone> expired = new ArrayList<>();
+            for (PrimeDrone drone : STATE.activeDrones) {
+                drone.ageTicks++;
+                if (drone.attackCooldown > 0) {
+                    drone.attackCooldown--;
+                }
+
+                float rot = drone.orbitAngle + (drone.ageTicks * 0.10f);
+                Vec3 desiredPos = clientPlayer.position().add(
+                        Math.cos(rot) * 1.85,
+                        1.45 + Math.sin(drone.ageTicks * 0.18) * 0.10,
+                        Math.sin(rot) * 1.85
+                );
+
+                if (nearestTarget != null) {
+                    Vec3 targetPos = nearestTarget.position().add(0.0, nearestTarget.getBbHeight() * 0.65, 0.0);
+                    drone.pos = drone.pos.lerp(targetPos, 0.25);
+                    double dx = targetPos.x - drone.pos.x;
+                    double dz = targetPos.z - drone.pos.z;
+                    if (dx * dx + dz * dz > 0.0001) {
+                        drone.yaw = (float) (Math.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0f;
+                    }
+                    if (drone.pos.distanceTo(targetPos) <= 1.6 && drone.attackCooldown <= 0) {
+                        drone.attackCooldown = 25;
+                        nearestTarget.hurt(realPlayer.level().damageSources().playerAttack(realPlayer), 4.0f);
+                    }
+                } else {
+                    drone.pos = drone.pos.lerp(desiredPos, 0.25);
+                    drone.yaw = clientPlayer.getYRot();
+                }
+
+                if (drone.ageTicks >= DRONE_LIFETIME_TICKS) {
+                    spawnTeleportParticles(clientPlayer, drone.pos.x, drone.pos.y, drone.pos.z);
+                    expired.add(drone);
+                }
+            }
+
+            STATE.activeDrones.removeAll(expired);
         }
 
         private static boolean isArrowSource(DamageSource source) {
@@ -284,18 +431,17 @@ public class RickPrimeMod {
             if (chance <= 0.0) return false;
             if (chance >= 1.0) return true;
 
-            // Tirada independiente en cada intento (no una semilla fija por mob),
-            // para que el % se cumpla de verdad a lo largo del tiempo.
             return new Random().nextDouble() < chance;
         }
 
         @SubscribeEvent(priority = EventPriority.HIGHEST)
         public static void onLivingDeath(LivingDeathEvent event) {
             if (!isLocalPlayer(event.getEntity())) return;
-            Player player = (Player) event.getEntity(); // el jugador real que está muriendo, no el del cliente
+            Player player = (Player) event.getEntity();
 
             event.setCanceled(true);
             clampPlayerToOneHeart(player);
+            refreshFallenLimbSkins(player);
             player.displayClientMessage(Component.literal(
                     "§4[Rick Prime] ¡Muerte evitada! Quedaste a 1 corazón. Presiona 'R' para regenerarte."), true);
         }
@@ -319,6 +465,7 @@ public class RickPrimeMod {
         public static void onLivingAttack(LivingAttackEvent event) {
             if (!isLocalPlayer(event.getEntity())) return;
             Player player = (Player) event.getEntity();
+            refreshFallenLimbSkins(player);
 
             if (STATE.evasionActive) {
                 event.setCanceled(true);
@@ -348,6 +495,7 @@ public class RickPrimeMod {
         public static void onPlayerHurt(LivingHurtEvent event) {
             if (!isLocalPlayer(event.getEntity())) return;
             Player player = (Player) event.getEntity();
+            refreshFallenLimbSkins(player);
 
             if (STATE.evasionActive) {
                 event.setCanceled(true);
@@ -367,14 +515,20 @@ public class RickPrimeMod {
 
             float currentHealth = player.getHealth();
             float currentAbsorption = player.getAbsorptionAmount();
-            float totalPool = currentHealth + currentAbsorption;
             float damage = event.getAmount();
 
             if (damage <= 0.0f) {
                 return;
             }
 
-            if (STATE.isDown || currentHealth <= 2.0f || (currentHealth <= 2.0f && currentAbsorption <= 0.0f)) {
+            float absorbedDamage = Math.min(currentAbsorption, damage);
+            float effectiveDamage = Math.max(0.0f, damage - absorbedDamage);
+
+            if (effectiveDamage <= 0.0f) {
+                return;
+            }
+
+            if (STATE.isDown || currentHealth <= 2.0f) {
                 event.setCanceled(true);
                 clampPlayerToOneHeart(player);
                 return;
@@ -384,8 +538,8 @@ public class RickPrimeMod {
             boolean isExplosion = source.is(DamageTypeTags.IS_EXPLOSION);
             boolean isFall = source.is(DamageTypes.FALL) || source.is(DamageTypeTags.IS_FALL);
 
-            float maxAbsorbableBeforeFloor = Math.max(0.0f, totalPool - 2.0f);
-            float actualTotalLost = Math.min(damage, maxAbsorbableBeforeFloor);
+            float maxAbsorbableBeforeFloor = Math.max(0.0f, currentHealth - 2.0f);
+            float actualTotalLost = Math.min(effectiveDamage, maxAbsorbableBeforeFloor);
 
             if (isExplosion) {
                 float heartsLost = actualTotalLost / 2.0f;
@@ -398,7 +552,7 @@ public class RickPrimeMod {
                     limbsToLaunch = Math.min(LOSS_ORDER.length - STATE.partsLost, (int) Math.floor(heartsLost / 2.0f));
                 }
 
-                if (totalPool - damage <= 2.0f) {
+                if (currentHealth - effectiveDamage <= 2.0f) {
                     event.setCanceled(true);
                     player.setAbsorptionAmount(0.0f);
                     player.setHealth(2.0f);
@@ -424,11 +578,11 @@ public class RickPrimeMod {
                 return;
             }
 
-            if (isFall && (damage >= 18.0f || totalPool - damage <= 2.0f)) {
+            if (isFall && (effectiveDamage >= 18.0f || currentHealth - effectiveDamage <= 2.0f)) {
                 event.setCanceled(true);
                 player.setAbsorptionAmount(0.0f);
                 player.setHealth(2.0f);
-                processLostHealthLimbs(player, actualTotalLost, damage >= 18.0f);
+                processLostHealthLimbs(player, actualTotalLost, false);
                 STATE.isDown = true;
                 applyMovementPenalty(player);
                 player.displayClientMessage(Component.literal(
@@ -436,7 +590,7 @@ public class RickPrimeMod {
                 return;
             }
 
-            if (totalPool - damage <= 2.0f) {
+            if (currentHealth - effectiveDamage <= 2.0f) {
                 event.setCanceled(true);
                 player.setAbsorptionAmount(0.0f);
                 player.setHealth(2.0f);
@@ -448,7 +602,7 @@ public class RickPrimeMod {
                 return;
             }
 
-            processLostHealthLimbs(player, damage, false);
+            processLostHealthLimbs(player, effectiveDamage, false);
         }
 
         @SubscribeEvent
@@ -613,11 +767,9 @@ public class RickPrimeMod {
             STATE.partsLost++;
 
             float yaw = player.getYRot() + (player.getRandom().nextFloat() * 120f - 60f);
-            ResourceLocation skin = player instanceof AbstractClientPlayer acp
-                    ? acp.getSkinTextureLocation()
-                    : null;
+            ResourceLocation skin = resolvePlayerSkin(player);
 
-            Vec3 spawnPos = player.position().add(0, 0.8, 0);
+            Vec3 spawnPos = player.position().add(0, 0.85, 0);
             Vec3 velocity;
 
             if (flyingOut) {
@@ -627,9 +779,9 @@ public class RickPrimeMod {
                 velocity = new Vec3(Math.cos(angle) * horizontalSpeed, verticalSpeed, Math.sin(angle) * horizontalSpeed);
             } else {
                 velocity = new Vec3(
-                        (player.getRandom().nextDouble() - 0.5) * 0.18,
-                        0.15,
-                        (player.getRandom().nextDouble() - 0.5) * 0.18
+                        (player.getRandom().nextDouble() - 0.5) * 0.14,
+                        0.08,
+                        (player.getRandom().nextDouble() - 0.5) * 0.14
                 );
             }
 
@@ -674,8 +826,6 @@ public class RickPrimeMod {
             if (speed != null) speed.removeModifier(SPEED_MODIFIER_ID);
         }
 
-        // ---------- Evasión: teletransporte corto al recibir un ataque ----------
-
         private static void performEvasionTeleport(Player clientPlayer) {
             Player real = resolveAuthoritative(clientPlayer);
             Vec3 oldPos = real.position();
@@ -694,7 +844,6 @@ public class RickPrimeMod {
         }
 
         private static void spawnTeleportParticles(Player player, double x, double y, double z) {
-            // Estela/destello celeste, sin clon: solo un estallido de partículas en el punto de salida y de llegada.
             if (player.level() instanceof ServerLevel serverLevel) {
                 serverLevel.sendParticles(ParticleTypes.END_ROD, x, y, z, 30, 0.3, 0.6, 0.3, 0.02);
             } else {
@@ -736,15 +885,18 @@ public class RickPrimeMod {
                     STATE.evasionActiveTicksLeft = EVASION_DURATION_TICKS;
                     STATE.evasionChargeTicks = 0;
                     player.displayClientMessage(Component.literal(
-                            "§b[Rick Prime] ¡Evasión activada! Esquivarás ataques por 2 minutos."), true);
-                } else if (!STATE.evasionActive) {
-                    player.displayClientMessage(Component.literal("§7[Rick Prime] La evasión aún no está cargada."), true);
+                            "§b[Rick Prime] ¡Evasión activada! Esquivarás ataques teletransportándote."), true);
                 }
+            }
+
+            if (ClientModEvents.SUMMON_DRONES_KEY.consumeClick()) {
+                summonDrones(player);
             }
         }
 
         private static void startRegeneration(Player player) {
             STATE.regenerating = true;
+            refreshFallenLimbSkins(player);
             for (FallenLimb limb : STATE.fallenLimbs) {
                 limb.returning = true;
                 limb.returnStartPos = limb.worldPos;
@@ -753,54 +905,46 @@ public class RickPrimeMod {
             player.displayClientMessage(Component.literal("§a[Rick Prime] ¡Regenerándote y recuperando extremidades!"), true);
         }
 
-        // ---------- Física de las extremidades caídas: agua y empuje ----------
-
         private static void updateFallenLimbPhysics(Player player, FallenLimb limb) {
-            var level = player.level();
-            BlockPos atLimb = BlockPos.containing(limb.worldPos.x, limb.worldPos.y, limb.worldPos.z);
-            boolean inWater = level.getFluidState(atLimb).is(FluidTags.WATER);
+            if (limb.returning) return;
 
-            if (inWater) {
-                // Flota: frena la caída, empuja hacia arriba hasta quedar cerca de la
-                // superficie, y deja que el giro se apague lentamente (como un trapo en el agua).
-                limb.velocity = limb.velocity.scale(0.8);
-                double buoyantY = limb.velocity.y + 0.03;
-                limb.velocity = new Vec3(limb.velocity.x, Math.max(-0.02, Math.min(0.05, buoyantY)), limb.velocity.z);
-                limb.worldPos = limb.worldPos.add(limb.velocity);
-                limb.yaw += limb.spinYaw * 0.4f;
-                limb.spinYaw *= 0.9f;
-                limb.spinPitch *= 0.9f;
-            } else {
-                BlockPos belowLimb = BlockPos.containing(limb.worldPos.x, limb.worldPos.y - 0.12, limb.worldPos.z);
-                if (level.getBlockState(belowLimb).isAir()) {
-                    limb.velocity = limb.velocity.add(0, -0.05, 0);
-                    limb.worldPos = limb.worldPos.add(limb.velocity);
-                    limb.yaw += limb.spinYaw;
-                    limb.pitch += limb.spinPitch;
+            limb.velocity = limb.velocity.add(0.0, -0.05, 0.0);
+            double nextX = limb.worldPos.x + limb.velocity.x;
+            double nextY = limb.worldPos.y + limb.velocity.y;
+            double nextZ = limb.worldPos.z + limb.velocity.z;
+
+            BlockPos belowPos = BlockPos.containing(nextX, nextY - 0.12, nextZ);
+            boolean onGround = !player.level().getBlockState(belowPos).isAir() && limb.velocity.y <= 0.0;
+
+            if (onGround) {
+                if (limb.velocity.y < -0.18) {
+                    limb.velocity = new Vec3(limb.velocity.x * 0.65, -limb.velocity.y * 0.35, limb.velocity.z * 0.65);
+                    limb.spinYaw *= 0.6f;
+                    limb.spinPitch *= 0.6f;
                 } else {
-                    limb.velocity = Vec3.ZERO;
-                    limb.spinYaw = 0f;
-                    limb.spinPitch = 0f;
-                    limb.pitch = 90f;
+                    limb.velocity = new Vec3(limb.velocity.x * 0.78, 0.0, limb.velocity.z * 0.78);
+                    limb.spinYaw *= 0.5f;
+                    limb.spinPitch *= 0.5f;
+                    if (limb.velocity.horizontalDistanceSqr() < 0.0004) {
+                        limb.velocity = Vec3.ZERO;
+                        limb.spinYaw = 0f;
+                        limb.spinPitch = 0f;
+                    }
+                    limb.pitch += (90f - limb.pitch) * 0.35f;
                 }
             }
 
-            applyPushFromNearbyEntities(level, limb);
-        }
+            double finalY = onGround && limb.velocity.y <= 0.0
+                    ? Math.max(limb.worldPos.y, belowPos.getY() + 1.08)
+                    : limb.worldPos.y + limb.velocity.y;
 
-        private static void applyPushFromNearbyEntities(net.minecraft.world.level.Level level, FallenLimb limb) {
-            AABB area = new AABB(
-                    limb.worldPos.x - 0.6, limb.worldPos.y - 0.4, limb.worldPos.z - 0.6,
-                    limb.worldPos.x + 0.6, limb.worldPos.y + 0.7, limb.worldPos.z + 0.6
+            limb.worldPos = new Vec3(
+                    limb.worldPos.x + limb.velocity.x,
+                    finalY,
+                    limb.worldPos.z + limb.velocity.z
             );
-            for (Entity entity : level.getEntities((Entity) null, area, e -> e instanceof LivingEntity && e.isAlive())) {
-                Vec3 diff = new Vec3(limb.worldPos.x - entity.getX(), 0, limb.worldPos.z - entity.getZ());
-                double dist = diff.length();
-                if (dist > 0.0001 && dist < 0.55) {
-                    Vec3 push = diff.normalize().scale(0.06 * (0.55 - dist));
-                    limb.velocity = limb.velocity.add(push.x, 0.015, push.z);
-                }
-            }
+            limb.yaw += limb.spinYaw;
+            limb.pitch += limb.spinPitch;
         }
 
         @SubscribeEvent
@@ -809,6 +953,24 @@ public class RickPrimeMod {
             Player player = Minecraft.getInstance().player;
             if (player == null) return;
 
+            serverTickCounter++;
+            refreshFallenLimbSkins(player);
+            updateDrones(player);
+
+            if (STATE.droneCooldownTicksLeft > 0) {
+                STATE.droneCooldownTicksLeft--;
+            }
+
+            if (STATE.evasionActive) {
+                STATE.evasionActiveTicksLeft--;
+                if (STATE.evasionActiveTicksLeft <= 0) {
+                    STATE.evasionActive = false;
+                    STATE.evasionActiveTicksLeft = 0;
+                }
+            } else if (STATE.evasionChargeTicks < EVASION_FULL_CHARGE_TICKS) {
+                STATE.evasionChargeTicks++;
+            }
+
             if (STATE.orangeShieldCooldownTicks > 0) {
                 STATE.orangeShieldCooldownTicks--;
                 if (STATE.orangeShieldCooldownTicks == 0) {
@@ -816,26 +978,8 @@ public class RickPrimeMod {
                 }
             }
 
-            if (STATE.evasionActive) {
-                STATE.evasionActiveTicksLeft--;
-                if (STATE.evasionActiveTicksLeft <= 0) {
-                    STATE.evasionActive = false;
-                    player.displayClientMessage(Component.literal("§7[Rick Prime] Evasión terminada. Empezando a recargar."), true);
-                }
-            } else if (STATE.evasionChargeTicks < EVASION_FULL_CHARGE_TICKS) {
-                // Solo carga cuando la evasión ya NO está activa (primero se acaba, luego recién recarga).
-                STATE.evasionChargeTicks++;
-            }
-
-            // (Se quitó el clamp de vida que había aquí: corría cada tick sobre el
-            // jugador del CLIENTE y peleaba contra el valor real que manda el servidor
-            // integrado, causando que "la vida no coincida". El clamp real ya ocurre
-            // en onPlayerHurt/onLivingDeath sobre el jugador correcto (event.getEntity()).)
-
             for (FallenLimb limb : STATE.fallenLimbs) {
-                if (!limb.returning) {
-                    updateFallenLimbPhysics(player, limb);
-                }
+                updateFallenLimbPhysics(player, limb);
             }
 
             if (STATE.isImmobilized) {
@@ -879,31 +1023,6 @@ public class RickPrimeMod {
             player.setPose(Pose.STANDING);
             clearMovementPenalty(player);
             player.displayClientMessage(Component.literal("§a[Rick Prime] ¡Te has regenerado al 100%!"), true);
-        }
-
-        // Revisa cada medio segundo a los mobs cercanos que YA te tenían fichado
-        // desde antes de perder extremidades (los eventos de arriba solo atrapan
-        // el momento exacto de un nuevo ataque/objetivo, no a los que ya venían
-        // persiguiéndote).
-        @SubscribeEvent
-        public static void onServerTick(TickEvent.ServerTickEvent event) {
-            if (event.phase != TickEvent.Phase.END) return;
-            if (STATE.partsLost <= 1) return;
-
-            serverTickCounter++;
-            if (serverTickCounter % 10 != 0) return;
-
-            Player clientPlayer = Minecraft.getInstance().player;
-            if (clientPlayer == null) return;
-            Player real = resolveAuthoritative(clientPlayer);
-            if (!(real.level() instanceof ServerLevel serverLevel)) return;
-
-            AABB area = real.getBoundingBox().inflate(16.0);
-            for (Mob mob : serverLevel.getEntitiesOfClass(Mob.class, area)) {
-                if (mob.getTarget() == real && shouldMobStopAttacking(mob, real)) {
-                    mob.setTarget(null);
-                }
-            }
         }
     }
 
@@ -1026,25 +1145,103 @@ public class RickPrimeMod {
             PoseStack poseStack = event.getPoseStack();
             MultiBufferSource.BufferSource bufferSource = mc.renderBuffers().bufferSource();
 
-            if (player != null && STATE.orangeShieldCooldownTicks > 0) {
-                renderOrangeCircularShield(player, poseStack, bufferSource, camPos, event.getPartialTick());
-            }
-
             if (!STATE.fallenLimbs.isEmpty()) {
                 if (model == null) {
                     model = new PlayerModel<>(mc.getEntityModels().bakeLayer(ModelLayers.PLAYER), false);
                 }
 
                 for (FallenLimb limb : STATE.fallenLimbs) {
-                    if (limb.skin == null) continue;
-                    renderLimb(limb, poseStack, bufferSource, camPos);
+                    ResourceLocation tex = limb.skin != null ? limb.skin : DEFAULT_STEVE_SKIN;
+                    renderLimb(limb, tex, poseStack, bufferSource, camPos);
+                    bufferSource.endBatch(RenderType.entityCutoutNoCull(tex));
                 }
             }
 
-            bufferSource.endBatch();
+            if (player != null && !STATE.activeDrones.isEmpty()) {
+                for (PrimeDrone drone : STATE.activeDrones) {
+                    renderDrone(drone, poseStack, bufferSource, camPos);
+                }
+                bufferSource.endBatch(RenderType.translucent());
+            }
+
+            if (player != null && STATE.orangeShieldCooldownTicks > 0) {
+                renderOrangeCircularShield(player, poseStack, bufferSource, camPos, event.getPartialTick());
+                bufferSource.endBatch(RenderType.translucent());
+            }
         }
 
-        // Esfera 3D de color naranja que rodea completamente al jugador
+        /**
+         * Forma angular de los drones de Rick Prime (imagen):
+         * - Chasis principal gris/celeste con dos cuernos/puntas superiores
+         * - Aletas laterales inferiores y mandíbula inferior
+         * - Sensor superior celeste y núcleo/ojo central naranja-rojizo brillante
+         * - Escala fija uniforme para todos los robots.
+         */
+        private static void renderDrone(PrimeDrone drone, PoseStack poseStack,
+                                        MultiBufferSource.BufferSource bufferSource, Vec3 camPos) {
+            poseStack.pushPose();
+            poseStack.translate(drone.pos.x - camPos.x, drone.pos.y - camPos.y, drone.pos.z - camPos.z);
+            poseStack.mulPose(Axis.YP.rotationDegrees(180.0f - drone.yaw));
+            poseStack.scale(DRONE_UNIFORM_SCALE, DRONE_UNIFORM_SCALE, DRONE_UNIFORM_SCALE);
+
+            Matrix4f mat = poseStack.last().pose();
+            VertexConsumer consumer = bufferSource.getBuffer(RenderType.translucent());
+
+            // Cuerpo / máscara central gris-azulado
+            addBox(consumer, mat, -0.18f, -0.14f, -0.10f,  0.18f,  0.16f, 0.12f, 0.68f, 0.74f, 0.80f, 0.96f);
+            // Cuerno/punta superior izquierda y derecha
+            addBox(consumer, mat, -0.22f,  0.14f, -0.09f, -0.08f,  0.34f, 0.10f, 0.76f, 0.84f, 0.92f, 0.96f);
+            addBox(consumer, mat,  0.08f,  0.14f, -0.09f,  0.22f,  0.34f, 0.10f, 0.76f, 0.84f, 0.92f, 0.96f);
+            // Aletas laterales
+            addBox(consumer, mat, -0.32f, -0.06f, -0.08f, -0.16f,  0.05f, 0.08f, 0.52f, 0.74f, 0.88f, 0.95f);
+            addBox(consumer, mat,  0.16f, -0.06f, -0.08f,  0.32f,  0.05f, 0.08f, 0.52f, 0.74f, 0.88f, 0.95f);
+            // Sección inferior con aletas
+            addBox(consumer, mat, -0.24f, -0.25f, -0.08f, -0.10f, -0.14f, 0.08f, 0.45f, 0.72f, 0.86f, 0.95f);
+            addBox(consumer, mat,  0.10f, -0.25f, -0.08f,  0.24f, -0.14f, 0.08f, 0.45f, 0.72f, 0.86f, 0.95f);
+            addBox(consumer, mat, -0.09f, -0.26f, -0.07f,  0.09f, -0.15f, 0.07f, 0.35f, 0.78f, 0.92f, 0.95f);
+            // Sensor circular superior
+            addBox(consumer, mat, -0.04f,  0.09f,  0.11f,  0.04f,  0.17f, 0.15f, 0.35f, 0.88f, 1.00f, 0.98f);
+            // Núcleo / lente central naranja-rojizo brillante
+            addBox(consumer, mat, -0.10f, -0.10f,  0.10f,  0.10f,  0.08f, 0.17f, 1.00f, 0.42f, 0.08f, 1.00f);
+
+            poseStack.popPose();
+        }
+
+        private static void addBox(VertexConsumer consumer, Matrix4f mat,
+                                   float x0, float y0, float z0,
+                                   float x1, float y1, float z1,
+                                   float r, float g, float b, float a) {
+            consumer.vertex(mat, x0, y0, z1).color(r, g, b, a).uv(0, 0).overlayCoords(0).uv2(15728880).normal(0, 0, 1).endVertex();
+            consumer.vertex(mat, x1, y0, z1).color(r, g, b, a).uv(1, 0).overlayCoords(0).uv2(15728880).normal(0, 0, 1).endVertex();
+            consumer.vertex(mat, x1, y1, z1).color(r, g, b, a).uv(1, 1).overlayCoords(0).uv2(15728880).normal(0, 0, 1).endVertex();
+            consumer.vertex(mat, x0, y1, z1).color(r, g, b, a).uv(0, 1).overlayCoords(0).uv2(15728880).normal(0, 0, 1).endVertex();
+
+            consumer.vertex(mat, x1, y0, z0).color(r, g, b, a).uv(0, 0).overlayCoords(0).uv2(15728880).normal(0, 0, -1).endVertex();
+            consumer.vertex(mat, x0, y0, z0).color(r, g, b, a).uv(1, 0).overlayCoords(0).uv2(15728880).normal(0, 0, -1).endVertex();
+            consumer.vertex(mat, x0, y1, z0).color(r, g, b, a).uv(1, 1).overlayCoords(0).uv2(15728880).normal(0, 0, -1).endVertex();
+            consumer.vertex(mat, x1, y1, z0).color(r, g, b, a).uv(0, 1).overlayCoords(0).uv2(15728880).normal(0, 0, -1).endVertex();
+
+            consumer.vertex(mat, x0, y1, z1).color(r, g, b, a).uv(0, 0).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
+            consumer.vertex(mat, x1, y1, z1).color(r, g, b, a).uv(1, 0).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
+            consumer.vertex(mat, x1, y1, z0).color(r, g, b, a).uv(1, 1).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
+            consumer.vertex(mat, x0, y1, z0).color(r, g, b, a).uv(0, 1).overlayCoords(0).uv2(15728880).normal(0, 1, 0).endVertex();
+
+            consumer.vertex(mat, x0, y0, z0).color(r, g, b, a).uv(0, 0).overlayCoords(0).uv2(15728880).normal(0, -1, 0).endVertex();
+            consumer.vertex(mat, x1, y0, z0).color(r, g, b, a).uv(1, 0).overlayCoords(0).uv2(15728880).normal(0, -1, 0).endVertex();
+            consumer.vertex(mat, x1, y0, z1).color(r, g, b, a).uv(1, 1).overlayCoords(0).uv2(15728880).normal(0, -1, 0).endVertex();
+            consumer.vertex(mat, x0, y0, z1).color(r, g, b, a).uv(0, 1).overlayCoords(0).uv2(15728880).normal(0, -1, 0).endVertex();
+
+            consumer.vertex(mat, x1, y0, z1).color(r, g, b, a).uv(0, 0).overlayCoords(0).uv2(15728880).normal(1, 0, 0).endVertex();
+            consumer.vertex(mat, x1, y0, z0).color(r, g, b, a).uv(1, 0).overlayCoords(0).uv2(15728880).normal(1, 0, 0).endVertex();
+            consumer.vertex(mat, x1, y1, z0).color(r, g, b, a).uv(1, 1).overlayCoords(0).uv2(15728880).normal(1, 0, 0).endVertex();
+            consumer.vertex(mat, x1, y1, z1).color(r, g, b, a).uv(0, 1).overlayCoords(0).uv2(15728880).normal(1, 0, 0).endVertex();
+
+            consumer.vertex(mat, x0, y0, z0).color(r, g, b, a).uv(0, 0).overlayCoords(0).uv2(15728880).normal(-1, 0, 0).endVertex();
+            consumer.vertex(mat, x0, y0, z1).color(r, g, b, a).uv(1, 0).overlayCoords(0).uv2(15728880).normal(-1, 0, 0).endVertex();
+            consumer.vertex(mat, x0, y1, z1).color(r, g, b, a).uv(1, 1).overlayCoords(0).uv2(15728880).normal(-1, 0, 0).endVertex();
+            consumer.vertex(mat, x0, y1, z0).color(r, g, b, a).uv(0, 1).overlayCoords(0).uv2(15728880).normal(-1, 0, 0).endVertex();
+        }
+
         private static void renderOrangeCircularShield(Player player, PoseStack poseStack,
                                                        MultiBufferSource.BufferSource bufferSource,
                                                        Vec3 camPos, float partialTick) {
@@ -1103,7 +1300,7 @@ public class RickPrimeMod {
             poseStack.popPose();
         }
 
-        private static void renderLimb(FallenLimb limb, PoseStack poseStack,
+        private static void renderLimb(FallenLimb limb, ResourceLocation tex, PoseStack poseStack,
                                         MultiBufferSource.BufferSource bufferSource, Vec3 camPos) {
             ModelPart target = switch (limb.part) {
                 case RIGHT_LEG -> model.rightLeg;
@@ -1151,9 +1348,9 @@ public class RickPrimeMod {
             poseStack.scale(-1.0f, -1.0f, 1.0f);
             poseStack.translate(0, -1.5, 0);
 
-            var buffer = bufferSource.getBuffer(RenderType.entityCutoutNoCull(limb.skin));
-            target.render(poseStack, buffer, 15728880, net.minecraft.client.renderer.texture.OverlayTexture.NO_OVERLAY);
-            outerLayer.render(poseStack, buffer, 15728880, net.minecraft.client.renderer.texture.OverlayTexture.NO_OVERLAY);
+            var buffer = bufferSource.getBuffer(RenderType.entityCutoutNoCull(tex));
+            target.render(poseStack, buffer, 15728880, OverlayTexture.NO_OVERLAY);
+            outerLayer.render(poseStack, buffer, 15728880, OverlayTexture.NO_OVERLAY);
 
             poseStack.popPose();
         }
