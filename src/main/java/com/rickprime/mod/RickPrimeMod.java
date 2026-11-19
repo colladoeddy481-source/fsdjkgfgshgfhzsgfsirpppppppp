@@ -49,8 +49,6 @@ public class RickPrimeMod {
     public RickPrimeMod() {
     }
 
-    // ================= Modelo de datos =================
-
     public enum BodyPart {
         RIGHT_LEG, LEFT_LEG, RIGHT_ARM, LEFT_ARM
     }
@@ -116,8 +114,6 @@ public class RickPrimeMod {
     private static final AttributeModifier IMMOBILE_SPEED_MOD =
             new AttributeModifier(SPEED_MODIFIER_ID, "rickprime.immobile_speed", -1.0, AttributeModifier.Operation.MULTIPLY_TOTAL);
 
-    // ================= Keybinding =================
-
     @Mod.EventBusSubscriber(modid = MODID, bus = Mod.EventBusSubscriber.Bus.MOD, value = Dist.CLIENT)
     public static class ClientModEvents {
         public static final KeyMapping REGEN_KEY = new KeyMapping(
@@ -132,8 +128,6 @@ public class RickPrimeMod {
             event.register(REGEN_KEY);
         }
     }
-
-    // ================= Lógica de daño, bloqueo de brazos, input y tick =================
 
     @Mod.EventBusSubscriber(modid = MODID, value = Dist.CLIENT)
     public static class ForgeClientEvents {
@@ -237,13 +231,11 @@ public class RickPrimeMod {
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null) return;
 
-            // Bloquea ataque/minado (clic izquierdo) si falta brazo derecho
             if (event.isAttack() && STATE.missing(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
                 event.setSwingHand(false);
             }
 
-            // Bloquea uso (clic derecho) según la mano activa y el brazo faltante
             if (event.isUseItem()) {
                 if (event.getHand() == InteractionHand.MAIN_HAND && STATE.missing(BodyPart.RIGHT_ARM)) {
                     event.setCanceled(true);
@@ -254,8 +246,6 @@ public class RickPrimeMod {
                 }
             }
         }
-
-        // --- FIN BLOQUEO DE MANOS ---
 
         private static void shatterAllRemainingParts(Player player, boolean isExplosion) {
             while (STATE.partsLost < LOSS_ORDER.length) {
@@ -440,8 +430,6 @@ public class RickPrimeMod {
         }
     }
 
-    // ================= Ocultar extremidades perdidas del jugador =================
-
     @Mod.EventBusSubscriber(modid = MODID, value = Dist.CLIENT)
     public static class PlayerModelHider {
 
@@ -487,8 +475,6 @@ public class RickPrimeMod {
             playerModel.leftSleeve.visible = true;
         }
     }
-
-    // ================= Render de las extremidades caídas =================
 
     @Mod.EventBusSubscriber(modid = MODID, value = Dist.CLIENT)
     public static class LimbRenderer {
