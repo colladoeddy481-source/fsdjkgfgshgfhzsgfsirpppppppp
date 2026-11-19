@@ -18,6 +18,7 @@ import net.minecraft.client.renderer.entity.layers.ItemInHandLayer;
 import net.minecraft.client.renderer.entity.layers.RenderLayer;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.DamageTypeTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.damagesource.DamageSource;
@@ -179,6 +180,24 @@ public class RickPrimeMod {
             return player != null && entity.getId() == player.getId();
         }
 
+        /**
+         * La vida/hambre son autoritativas del SERVIDOR. En singleplayer, el cliente
+         * y el servidor integrado son dos objetos Java distintos aunque representen
+         * al mismo jugador: mutar solo el del cliente causa que la vida "no coincida"
+         * (el servidor sigue enviando su propio valor real) y, en algunos casos, que
+         * el jugador muera de verdad porque el servidor nunca se enteró del clamp.
+         * Esta función busca al jugador REAL del servidor integrado para que los
+         * cambios de vida/absorción se apliquen donde de verdad importan.
+         */
+        private static Player resolveAuthoritative(Player fallback) {
+            var integratedServer = Minecraft.getInstance().getSingleplayerServer();
+            if (integratedServer != null) {
+                ServerPlayer real = integratedServer.getPlayerList().getPlayer(fallback.getUUID());
+                if (real != null) return real;
+            }
+            return fallback;
+        }
+
         private static boolean isArrowSource(DamageSource source) {
             return source.getDirectEntity() instanceof AbstractArrow || source.is(DamageTypeTags.IS_PROJECTILE);
         }
@@ -216,8 +235,7 @@ public class RickPrimeMod {
         @SubscribeEvent(priority = EventPriority.HIGHEST)
         public static void onLivingDeath(LivingDeathEvent event) {
             if (!isLocalPlayer(event.getEntity())) return;
-            Player player = Minecraft.getInstance().player;
-            if (player == null) return;
+            Player player = (Player) event.getEntity(); // el jugador real que está muriendo, no el del cliente
 
             event.setCanceled(true);
             clampPlayerToOneHeart(player);
@@ -240,8 +258,7 @@ public class RickPrimeMod {
         @SubscribeEvent
         public static void onLivingAttack(LivingAttackEvent event) {
             if (!isLocalPlayer(event.getEntity())) return;
-            Player player = Minecraft.getInstance().player;
-            if (player == null) return;
+            Player player = (Player) event.getEntity();
 
             if (isArrowSource(event.getSource())) {
                 event.setCanceled(true);
@@ -263,8 +280,7 @@ public class RickPrimeMod {
         @SubscribeEvent(priority = EventPriority.HIGHEST)
         public static void onPlayerHurt(LivingHurtEvent event) {
             if (!isLocalPlayer(event.getEntity())) return;
-            Player player = Minecraft.getInstance().player;
-            if (player == null) return;
+            Player player = (Player) event.getEntity();
 
             if (isArrowSource(event.getSource())) {
                 event.setCanceled(true);
@@ -366,8 +382,7 @@ public class RickPrimeMod {
         @SubscribeEvent
         public static void onUseItemFinish(LivingEntityUseItemEvent.Finish event) {
             if (!isLocalPlayer(event.getEntity())) return;
-            Player localPlayer = Minecraft.getInstance().player;
-            if (localPlayer == null) return;
+            Player localPlayer = (Player) event.getEntity();
 
             ItemStack stack = event.getItem();
             if (!stack.isEdible() || stack.getFoodProperties(localPlayer) == null) return;
@@ -417,8 +432,7 @@ public class RickPrimeMod {
         @SubscribeEvent
         public static void onUseItemStart(LivingEntityUseItemEvent.Start event) {
             if (!isLocalPlayer(event.getEntity())) return;
-            Player localPlayer = Minecraft.getInstance().player;
-            if (localPlayer == null) return;
+            Player localPlayer = (Player) event.getEntity();
 
             if (shouldCancelUseItem(localPlayer, localPlayer.getUsedItemHand())) {
                 event.setCanceled(true);
@@ -428,8 +442,7 @@ public class RickPrimeMod {
         @SubscribeEvent
         public static void onUseItemTick(LivingEntityUseItemEvent.Tick event) {
             if (!isLocalPlayer(event.getEntity())) return;
-            Player localPlayer = Minecraft.getInstance().player;
-            if (localPlayer == null) return;
+            Player localPlayer = (Player) event.getEntity();
 
             if (shouldCancelUseItem(localPlayer, localPlayer.getUsedItemHand())) {
                 event.setCanceled(true);
@@ -634,9 +647,10 @@ public class RickPrimeMod {
                 }
             }
 
-            if (!STATE.regenerating && (STATE.isDown || player.getHealth() < 2.0f)) {
-                clampPlayerToOneHeart(player);
-            }
+            // (Se quitó el clamp de vida que había aquí: corría cada tick sobre el
+            // jugador del CLIENTE y peleaba contra el valor real que manda el servidor
+            // integrado, causando que "la vida no coincida". El clamp real ya ocurre
+            // en onPlayerHurt/onLivingDeath sobre el jugador correcto (event.getEntity()).)
 
             for (FallenLimb limb : STATE.fallenLimbs) {
                 if (!limb.returning) {
@@ -673,9 +687,10 @@ public class RickPrimeMod {
                 }
             }
 
+            Player realPlayer = resolveAuthoritative(player);
             float healPerTick = (STATE.originalMaxHealth - 2.0f) / FallenLimb.RETURN_DURATION;
-            if (player.getHealth() < STATE.originalMaxHealth) {
-                player.setHealth(Math.min(STATE.originalMaxHealth, player.getHealth() + healPerTick));
+            if (realPlayer.getHealth() < STATE.originalMaxHealth) {
+                realPlayer.setHealth(Math.min(STATE.originalMaxHealth, realPlayer.getHealth() + healPerTick));
             }
 
             if (allHome) {
@@ -690,7 +705,7 @@ public class RickPrimeMod {
             STATE.partsLost = 0;
             STATE.healthLostAccumulated = 0.0f;
             STATE.fallenLimbs.clear();
-            player.setHealth(STATE.originalMaxHealth);
+            resolveAuthoritative(player).setHealth(STATE.originalMaxHealth);
             player.setPose(Pose.STANDING);
             clearMovementPenalty(player);
             player.displayClientMessage(Component.literal("§a[Rick Prime] ¡Te has regenerado al 100%!"), true);
