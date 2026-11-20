@@ -93,6 +93,9 @@ public class RickPrimeMod {
     private static final int DRONE_COOLDOWN_TICKS = 10 * 20;
     private static final int DRONE_IDLE_TIMEOUT_TICKS = 2 * 60 * 20;
     private static final float DRONE_UNIFORM_SCALE = 1.0f;
+    // 2 chunks x 2 chunks = 32 x 32 bloques (±16 en X y Z, altura ±16 en Y)
+    private static final double DRONE_SEARCH_HALF_EXTENT_XZ = 16.0;
+    private static final double DRONE_SEARCH_HALF_EXTENT_Y = 16.0;
 
     private static final int RED_BEAM_CHARGE_TICKS = 60 * 20;
     private static final int RED_BEAM_VISUAL_TICKS = 8;
@@ -141,15 +144,15 @@ public class RickPrimeMod {
     private static class PrimeDrone {
         Vec3 pos;
         float yaw;
-        final float orbitAngle;
+        final int slotIndex;
         int ageTicks = 0;
         int ticksWithoutEnemy = 0;
         int attackCooldown = 0;
 
-        PrimeDrone(Vec3 pos, float yaw, float orbitAngle) {
+        PrimeDrone(Vec3 pos, float yaw, int slotIndex) {
             this.pos = pos;
             this.yaw = yaw;
-            this.orbitAngle = orbitAngle;
+            this.slotIndex = slotIndex;
         }
     }
 
@@ -247,27 +250,22 @@ public class RickPrimeMod {
     private static void renderHudBars(GuiGraphics guiGraphics, int width, int height) {
         int barWidth = 100;
         int barHeight = 4;
-        int x = width / 2 - barWidth / 2;
+        int x = width - barWidth - 12;
 
-        int evasionY = height - 54;
-        float evasionPct;
-        int evasionColor;
-        if (STATE.evasionActive) {
-            evasionPct = STATE.evasionActiveTicksLeft / (float) EVASION_DURATION_TICKS;
-            evasionColor = 0xFF40E0FF;
-        } else {
-            evasionPct = STATE.evasionChargeTicks / (float) EVASION_FULL_CHARGE_TICKS;
-            evasionColor = 0xFF2266DD;
-        }
-        evasionPct = Math.max(0f, Math.min(1f, evasionPct));
+        // 1. Barra de Rayo (arriba en la esquina inferior derecha)
+        int beamY = height - 36;
+        float beamPct = Math.max(0f, Math.min(1f, STATE.redBeamChargeTicks / (float) RED_BEAM_CHARGE_TICKS));
+        boolean beamReady = STATE.redBeamChargeTicks >= RED_BEAM_CHARGE_TICKS;
+        int beamColor = beamReady ? 0xFFFF2222 : 0xFF991111;
 
-        guiGraphics.fill(x - 1, evasionY - 1, x + barWidth + 1, evasionY + barHeight + 1, 0x80000000);
-        int evasionFilled = (int) (barWidth * evasionPct);
-        if (evasionFilled > 0) {
-            guiGraphics.fill(x, evasionY, x + evasionFilled, evasionY + barHeight, evasionColor);
+        guiGraphics.fill(x - 1, beamY - 1, x + barWidth + 1, beamY + barHeight + 1, 0x80000000);
+        int beamFilled = (int) (barWidth * beamPct);
+        if (beamFilled > 0) {
+            guiGraphics.fill(x, beamY, x + beamFilled, beamY + barHeight, beamColor);
         }
 
-        int droneY = height - 62;
+        // 2. Barra de Drones (en medio en la esquina inferior derecha)
+        int droneY = height - 28;
         float droneReadyPct;
         int droneColor;
         if (STATE.droneCooldownTicksLeft > 0) {
@@ -285,15 +283,23 @@ public class RickPrimeMod {
             guiGraphics.fill(x, droneY, x + droneFilled, droneY + barHeight, droneColor);
         }
 
-        int beamY = height - 70;
-        float beamPct = Math.max(0f, Math.min(1f, STATE.redBeamChargeTicks / (float) RED_BEAM_CHARGE_TICKS));
-        boolean beamReady = STATE.redBeamChargeTicks >= RED_BEAM_CHARGE_TICKS;
-        int beamColor = beamReady ? 0xFFFF2222 : 0xFF991111;
+        // 3. Barra de Evasión (abajo en la esquina inferior derecha)
+        int evasionY = height - 20;
+        float evasionPct;
+        int evasionColor;
+        if (STATE.evasionActive) {
+            evasionPct = STATE.evasionActiveTicksLeft / (float) EVASION_DURATION_TICKS;
+            evasionColor = 0xFF40E0FF;
+        } else {
+            evasionPct = STATE.evasionChargeTicks / (float) EVASION_FULL_CHARGE_TICKS;
+            evasionColor = 0xFF2266DD;
+        }
+        evasionPct = Math.max(0f, Math.min(1f, evasionPct));
 
-        guiGraphics.fill(x - 1, beamY - 1, x + barWidth + 1, beamY + barHeight + 1, 0x80000000);
-        int beamFilled = (int) (barWidth * beamPct);
-        if (beamFilled > 0) {
-            guiGraphics.fill(x, beamY, x + beamFilled, beamY + barHeight, beamColor);
+        guiGraphics.fill(x - 1, evasionY - 1, x + barWidth + 1, evasionY + barHeight + 1, 0x80000000);
+        int evasionFilled = (int) (barWidth * evasionPct);
+        if (evasionFilled > 0) {
+            guiGraphics.fill(x, evasionY, x + evasionFilled, evasionY + barHeight, evasionColor);
         }
     }
 
@@ -461,7 +467,7 @@ public class RickPrimeMod {
             Vec3 finalEnd;
             if (hitMob != null && hitPos != null) {
                 finalEnd = hitPos;
-                applyZoneDamageToMob(realPlayer, hitMob, hitPos);
+                applyZoneDamageToMob(realPlayer, hitMob, hitPos, "Rayo Rojo");
             } else if (blockHit.getType() != HitResult.Type.MISS) {
                 finalEnd = blockHit.getLocation();
             } else {
@@ -476,23 +482,23 @@ public class RickPrimeMod {
             return true;
         }
 
-        private static void applyZoneDamageToMob(Player attacker, Mob targetMob, Vec3 hitPos) {
-            double baseY = targetMob.getY();
-            double height = Math.max(0.4, targetMob.getBbHeight());
+        private static void applyZoneDamageToMob(Player attacker, LivingEntity targetEntity, Vec3 hitPos, String sourceLabel) {
+            double baseY = targetEntity.getY();
+            double height = Math.max(0.4, targetEntity.getBbHeight());
             double relativeHeight = (hitPos.y - baseY) / height;
 
             if (relativeHeight >= 0.78) {
-                targetMob.hurt(attacker.level().damageSources().playerAttack(attacker), targetMob.getMaxHealth() * 100.0f + 999.0f);
-                if (targetMob.isAlive()) {
-                    targetMob.kill();
+                targetEntity.hurt(attacker.level().damageSources().playerAttack(attacker), targetEntity.getMaxHealth() * 100.0f + 999.0f);
+                if (targetEntity.isAlive()) {
+                    targetEntity.kill();
                 }
-                attacker.displayClientMessage(Component.literal("§4[Rayo Rojo] ¡Disparo en la cabeza! Eliminación instantánea."), true);
+                attacker.displayClientMessage(Component.literal("§4[" + sourceLabel + "] ¡Disparo en la cabeza! Eliminación instantánea."), true);
             } else if (relativeHeight >= 0.35) {
-                targetMob.hurt(attacker.level().damageSources().playerAttack(attacker), 12.0f);
-                attacker.displayClientMessage(Component.literal("§c[Rayo Rojo] ¡Impacto en el torso! (-6 corazones)"), true);
+                targetEntity.hurt(attacker.level().damageSources().playerAttack(attacker), 12.0f);
+                attacker.displayClientMessage(Component.literal("§c[" + sourceLabel + "] ¡Impacto en el torso! (-6 corazones)"), true);
             } else {
-                targetMob.hurt(attacker.level().damageSources().playerAttack(attacker), 5.0f);
-                attacker.displayClientMessage(Component.literal("§e[Rayo Rojo] Impacto en las extremidades inferiores. (-2.5 corazones)"), true);
+                targetEntity.hurt(attacker.level().damageSources().playerAttack(attacker), 5.0f);
+                attacker.displayClientMessage(Component.literal("§e[" + sourceLabel + "] Impacto en las extremidades inferiores. (-2.5 corazones)"), true);
             }
         }
 
@@ -530,9 +536,10 @@ public class RickPrimeMod {
 
             int toSpawn = Math.min(DRONES_PER_SUMMON, MAX_DRONES - STATE.activeDrones.size());
             for (int i = 0; i < toSpawn; i++) {
-                float angle = (float) ((Math.PI * 2.0 * (STATE.activeDrones.size() + 1)) / MAX_DRONES);
-                Vec3 spawnPos = clientPlayer.position().add(Math.cos(angle) * 1.6, 1.5, Math.sin(angle) * 1.6);
-                STATE.activeDrones.add(new PrimeDrone(spawnPos, clientPlayer.getYRot(), angle));
+                int slot = STATE.activeDrones.size();
+                Vec3 staticOffset = getStaticDroneOffset(slot);
+                Vec3 spawnPos = clientPlayer.position().add(staticOffset);
+                STATE.activeDrones.add(new PrimeDrone(spawnPos, clientPlayer.getYRot(), slot));
                 spawnTeleportParticles(clientPlayer, spawnPos.x, spawnPos.y, spawnPos.z);
             }
 
@@ -541,48 +548,93 @@ public class RickPrimeMod {
                     "§a[Rick Prime] ¡Dron generado! (" + STATE.activeDrones.size() + "/" + MAX_DRONES + " activos)"), true);
         }
 
+        private static Vec3 getStaticDroneOffset(int slotIndex) {
+            int col = (slotIndex % 5) - 2; // -2, -1, 0, 1, 2
+            int row = slotIndex / 5;       // 0 o 1
+            double xOffset = col * 0.65;
+            double yOffset = 1.65 + row * 0.45;
+            double zOffset = -0.75;
+            return new Vec3(xOffset, yOffset, zOffset);
+        }
+
+        private static Vec3 pickDroneAimPoint(LivingEntity target, Random random, int tick) {
+            double baseY = target.getY();
+            double h = Math.max(0.4, target.getBbHeight());
+            // Alterna entre cabeza (~0.86h), torso (~0.52h) y piernas (~0.18h)
+            int zoneRoll = Math.floorMod(tick + random.nextInt(3), 5);
+            double heightFactor;
+            if (zoneRoll == 0) {
+                heightFactor = 0.88; // Cabeza -> muerte instantánea
+            } else if (zoneRoll <= 2) {
+                heightFactor = 0.52; // Torso
+            } else {
+                heightFactor = 0.18; // Extremidades inferiores
+            }
+            return new Vec3(
+                    target.getX(),
+                    baseY + h * heightFactor,
+                    target.getZ()
+            );
+        }
+
         private static void updateDrones(Player clientPlayer) {
             if (STATE.activeDrones.isEmpty()) return;
 
             Player realPlayer = resolveAuthoritative(clientPlayer);
+            AABB twoByTwoChunksBox = new AABB(
+                    realPlayer.getX() - DRONE_SEARCH_HALF_EXTENT_XZ,
+                    realPlayer.getY() - DRONE_SEARCH_HALF_EXTENT_Y,
+                    realPlayer.getZ() - DRONE_SEARCH_HALF_EXTENT_XZ,
+                    realPlayer.getX() + DRONE_SEARCH_HALF_EXTENT_XZ,
+                    realPlayer.getY() + DRONE_SEARCH_HALF_EXTENT_Y,
+                    realPlayer.getZ() + DRONE_SEARCH_HALF_EXTENT_XZ
+            );
+
             List<LivingEntity> nearbyHostiles = realPlayer.level().getEntitiesOfClass(
                     LivingEntity.class,
-                    realPlayer.getBoundingBox().inflate(10.0),
+                    twoByTwoChunksBox,
                     e -> isHostileTarget(e, realPlayer)
             );
             nearbyHostiles.sort(Comparator.comparingDouble(e -> e.distanceToSqr(realPlayer)));
-            LivingEntity nearestTarget = nearbyHostiles.isEmpty() ? null : nearbyHostiles.get(0);
 
             List<PrimeDrone> expired = new ArrayList<>();
+            int idx = 0;
             for (PrimeDrone drone : STATE.activeDrones) {
                 drone.ageTicks++;
                 if (drone.attackCooldown > 0) {
                     drone.attackCooldown--;
                 }
 
-                float rot = drone.orbitAngle + (drone.ageTicks * 0.10f);
-                Vec3 desiredPos = clientPlayer.position().add(
-                        Math.cos(rot) * 1.85,
-                        1.45 + Math.sin(drone.ageTicks * 0.18) * 0.10,
-                        Math.sin(rot) * 1.85
-                );
+                // Posición estática junto al jugador sin girar alrededor de él
+                Vec3 idlePos = clientPlayer.position().add(getStaticDroneOffset(idx));
+                idx++;
 
-                if (nearestTarget != null) {
+                LivingEntity assignedTarget = null;
+                if (!nearbyHostiles.isEmpty()) {
+                    assignedTarget = nearbyHostiles.get((idx - 1) % nearbyHostiles.size());
+                }
+
+                if (assignedTarget != null) {
                     drone.ticksWithoutEnemy = 0;
-                    Vec3 targetPos = nearestTarget.position().add(0.0, nearestTarget.getBbHeight() * 0.65, 0.0);
-                    drone.pos = drone.pos.lerp(targetPos, 0.25);
-                    double dx = targetPos.x - drone.pos.x;
-                    double dz = targetPos.z - drone.pos.z;
+                    // Mantiene su posición estable sin orbitar alrededor del jugador
+                    drone.pos = drone.pos.lerp(idlePos, 0.25);
+
+                    Vec3 aimPos = pickDroneAimPoint(assignedTarget, realPlayer.getRandom(), drone.ageTicks + idx);
+                    double dx = aimPos.x - drone.pos.x;
+                    double dz = aimPos.z - drone.pos.z;
                     if (dx * dx + dz * dz > 0.0001) {
                         drone.yaw = (float) (Math.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0f;
                     }
-                    if (drone.pos.distanceTo(targetPos) <= 1.6 && drone.attackCooldown <= 0) {
-                        drone.attackCooldown = 25;
-                        nearestTarget.hurt(realPlayer.level().damageSources().playerAttack(realPlayer), 4.0f);
+
+                    if (drone.attackCooldown <= 0) {
+                        drone.attackCooldown = 20;
+                        STATE.activeBeams.add(new RedBeamEffect(drone.pos, aimPos));
+                        spawnRedBeamParticles(realPlayer, drone.pos, aimPos);
+                        applyZoneDamageToMob(realPlayer, assignedTarget, aimPos, "Dron");
                     }
                 } else {
                     drone.ticksWithoutEnemy++;
-                    drone.pos = drone.pos.lerp(desiredPos, 0.25);
+                    drone.pos = drone.pos.lerp(idlePos, 0.25);
                     drone.yaw = clientPlayer.getYRot();
 
                     if (drone.ticksWithoutEnemy >= DRONE_IDLE_TIMEOUT_TICKS) {
@@ -894,11 +946,6 @@ public class RickPrimeMod {
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null) return;
 
-            if (tryFireRedBeam(localPlayer)) {
-                event.setCanceled(true);
-                return;
-            }
-
             if (event.getHand() == InteractionHand.MAIN_HAND && STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
                 localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Tu brazo derecho está en el suelo!"), true);
@@ -906,15 +953,6 @@ public class RickPrimeMod {
                 event.setCanceled(true);
                 localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Tu brazo izquierdo está en el suelo!"), true);
             }
-        }
-
-        @SubscribeEvent
-        public static void onRightClickEmpty(PlayerInteractEvent.RightClickEmpty event) {
-            if (!isLocalPlayer(event.getEntity())) return;
-            Player localPlayer = Minecraft.getInstance().player;
-            if (localPlayer == null) return;
-
-            tryFireRedBeam(localPlayer);
         }
 
         @SubscribeEvent
@@ -933,8 +971,25 @@ public class RickPrimeMod {
         }
 
         @SubscribeEvent
+        public static void onLeftClickEmpty(PlayerInteractEvent.LeftClickEmpty event) {
+            if (!isLocalPlayer(event.getEntity())) return;
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null) return;
+
+            tryFireRedBeam(localPlayer);
+        }
+
+        @SubscribeEvent
         public static void onLeftClickBlock(PlayerInteractEvent.LeftClickBlock event) {
             if (!isLocalPlayer(event.getEntity())) return;
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null) return;
+
+            if (tryFireRedBeam(localPlayer)) {
+                event.setCanceled(true);
+                return;
+            }
+
             if (STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
             }
@@ -945,6 +1000,11 @@ public class RickPrimeMod {
             if (!isLocalPlayer(event.getEntity())) return;
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null) return;
+
+            if (tryFireRedBeam(localPlayer)) {
+                event.setCanceled(true);
+                return;
+            }
 
             if (STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
@@ -957,9 +1017,16 @@ public class RickPrimeMod {
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null) return;
 
-            if (event.isAttack() && STATE.armDetached(BodyPart.RIGHT_ARM)) {
-                event.setCanceled(true);
-                event.setSwingHand(false);
+            if (event.isAttack()) {
+                if (tryFireRedBeam(localPlayer)) {
+                    event.setCanceled(true);
+                    event.setSwingHand(false);
+                    return;
+                }
+                if (STATE.armDetached(BodyPart.RIGHT_ARM)) {
+                    event.setCanceled(true);
+                    event.setSwingHand(false);
+                }
             }
 
             if (event.isUseItem()) {
