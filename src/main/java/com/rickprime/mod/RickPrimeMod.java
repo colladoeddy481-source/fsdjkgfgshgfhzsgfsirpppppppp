@@ -16,6 +16,7 @@ import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.particles.DustParticleOptions;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
@@ -48,6 +49,7 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.client.event.InputEvent;
@@ -87,7 +89,6 @@ public class RickPrimeMod {
     public static final String MODID = "rickprime";
 
     private static final ResourceLocation DEFAULT_STEVE_SKIN = new ResourceLocation("textures/entity/steve.png");
-    // Textura en: src/main/resources/assets/rickprime/textures/entity/rick_prime.png
     private static final ResourceLocation RICK_PRIME_SKIN = new ResourceLocation(MODID, "textures/entity/rick_prime.png");
 
     private static final int MAX_DRONES = 10;
@@ -95,7 +96,6 @@ public class RickPrimeMod {
     private static final int DRONE_COOLDOWN_TICKS = 10 * 20;
     private static final int DRONE_IDLE_TIMEOUT_TICKS = 2 * 60 * 20;
     private static final float DRONE_UNIFORM_SCALE = 1.0f;
-    // 2 chunks x 2 chunks = 32 x 32 bloques (±16 en X y Z, altura ±16 en Y)
     private static final double DRONE_SEARCH_HALF_EXTENT_XZ = 16.0;
     private static final double DRONE_SEARCH_HALF_EXTENT_Y = 16.0;
 
@@ -198,7 +198,6 @@ public class RickPrimeMod {
         int droneCooldownTicksLeft = 0;
         int redBeamChargeTicks = 0;
 
-        // Evasión (teletransporte): barra que carga en 3 min, activa dura 30 s.
         int evasionChargeTicks = 0;
         boolean evasionActive = false;
         int evasionActiveTicksLeft = 0;
@@ -274,7 +273,6 @@ public class RickPrimeMod {
         int barHeight = 4;
         int x = width - barWidth - 12;
 
-        // 1. Barra de Rayo (arriba en la esquina inferior derecha)
         int beamY = height - 36;
         float beamPct = Math.max(0f, Math.min(1f, STATE.redBeamChargeTicks / (float) RED_BEAM_CHARGE_TICKS));
         boolean beamReady = STATE.redBeamChargeTicks >= RED_BEAM_CHARGE_TICKS;
@@ -286,7 +284,6 @@ public class RickPrimeMod {
             guiGraphics.fill(x, beamY, x + beamFilled, beamY + barHeight, beamColor);
         }
 
-        // 2. Barra de Drones (en medio en la esquina inferior derecha)
         int droneY = height - 28;
         float droneReadyPct;
         int droneColor;
@@ -305,7 +302,6 @@ public class RickPrimeMod {
             guiGraphics.fill(x, droneY, x + droneFilled, droneY + barHeight, droneColor);
         }
 
-        // 3. Barra de Evasión (abajo en la esquina inferior derecha)
         int evasionY = height - 20;
         float evasionPct;
         int evasionColor;
@@ -368,24 +364,16 @@ public class RickPrimeMod {
         public static void onPlayerLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
             Player player = event.getPlayer();
             STATE.reset();
+            clientTickCounter = 0;
             if (player != null) {
                 clearMovementPenalty(player);
             }
         }
 
         @SubscribeEvent
-        public static void onPlayerCloneOrRespawn(ClientPlayerNetworkEvent.Clone event) {
+        public static void onPlayerClone(ClientPlayerNetworkEvent.Clone event) {
             STATE.reset();
-            Player newPlayer = event.getNewPlayer();
-            if (newPlayer != null) {
-                clearMovementPenalty(newPlayer);
-                newPlayer.setPose(Pose.STANDING);
-            }
-        }
-
-        @SubscribeEvent
-        public static void onPlayerRespawn(ClientPlayerNetworkEvent.Respawn event) {
-            STATE.reset();
+            clientTickCounter = 0;
             Player newPlayer = event.getNewPlayer();
             if (newPlayer != null) {
                 clearMovementPenalty(newPlayer);
@@ -413,6 +401,15 @@ public class RickPrimeMod {
                 integratedServer.execute(action);
             } else {
                 action.run();
+            }
+        }
+
+        private static void runOnClientOrNow(Runnable action) {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.isSameThread()) {
+                action.run();
+            } else {
+                mc.execute(action);
             }
         }
 
@@ -608,7 +605,7 @@ public class RickPrimeMod {
                 }
             });
 
-            feedbackPlayer.displayClientMessage(Component.literal(message), true);
+            runOnClientOrNow(() -> feedbackPlayer.displayClientMessage(Component.literal(message), true));
         }
 
         private static void spawnRedBeamParticles(Player player, Vec3 start, Vec3 end) {
@@ -659,8 +656,8 @@ public class RickPrimeMod {
         }
 
         private static Vec3 getStaticDroneOffset(int slotIndex) {
-            int col = (slotIndex % 5) - 2; // -2, -1, 0, 1, 2
-            int row = slotIndex / 5;       // 0 o 1
+            int col = (slotIndex % 5) - 2;
+            int row = slotIndex / 5;
             double xOffset = col * 0.65;
             double yOffset = 1.65 + row * 0.45;
             double zOffset = -0.75;
@@ -673,11 +670,11 @@ public class RickPrimeMod {
             int zoneRoll = Math.floorMod(tick + random.nextInt(3), 5);
             double heightFactor;
             if (zoneRoll == 0) {
-                heightFactor = 0.88; // Cabeza -> eliminación instantánea
+                heightFactor = 0.88;
             } else if (zoneRoll <= 2) {
-                heightFactor = 0.52; // Torso
+                heightFactor = 0.52;
             } else {
-                heightFactor = 0.18; // Extremidades inferiores
+                heightFactor = 0.18;
             }
             return new Vec3(
                     target.getX(),
@@ -715,7 +712,6 @@ public class RickPrimeMod {
                     drone.attackCooldown--;
                 }
 
-                // Posición estática junto al jugador sin orbitar alrededor de él
                 Vec3 idlePos = clientPlayer.position().add(getStaticDroneOffset(drone.slotIndex));
                 drone.pos = drone.pos.lerp(idlePos, 0.25);
 
@@ -790,7 +786,7 @@ public class RickPrimeMod {
             boolean wasOff = STATE.orangeShieldCooldownTicks <= 0;
             STATE.orangeShieldCooldownTicks = BodyState.SHIELD_IDLE_TIMEOUT_TICKS;
             if (wasOff) {
-                player.displayClientMessage(Component.literal("§6[Rick Prime] ¡Esfera naranja activada!"), true);
+                runOnClientOrNow(() -> player.displayClientMessage(Component.literal("§6[Rick Prime] ¡Esfera naranja activada!"), true));
             }
         }
 
@@ -804,13 +800,15 @@ public class RickPrimeMod {
                 auth.clearFire();
                 applyMovementPenalty(auth);
             });
-            if (player.getHealth() < 2.0f) {
-                player.setHealth(2.0f);
-            }
-            player.setAbsorptionAmount(0.0f);
-            player.clearFire();
-            STATE.isDown = true;
-            applyMovementPenalty(player);
+            runOnClientOrNow(() -> {
+                if (player.getHealth() < 2.0f) {
+                    player.setHealth(2.0f);
+                }
+                player.setAbsorptionAmount(0.0f);
+                player.clearFire();
+                STATE.isDown = true;
+                applyMovementPenalty(player);
+            });
         }
 
         private static boolean shouldMobStopAttacking(Entity attacker, Player player) {
@@ -835,9 +833,11 @@ public class RickPrimeMod {
 
             event.setCanceled(true);
             clampPlayerToOneHeart(player);
-            refreshFallenLimbSkins(player);
-            player.displayClientMessage(Component.literal(
-                    "§4[Rick Prime] ¡Muerte evitada! Quedaste a 1 corazón. Presiona 'R' para regenerarte."), true);
+            runOnClientOrNow(() -> {
+                refreshFallenLimbSkins(player);
+                player.displayClientMessage(Component.literal(
+                        "§4[Rick Prime] ¡Muerte evitada! Quedaste a 1 corazón. Presiona 'R' para regenerarte."), true);
+            });
         }
 
         @SubscribeEvent
@@ -860,11 +860,11 @@ public class RickPrimeMod {
         public static void onLivingAttack(LivingAttackEvent event) {
             if (!isLocalPlayer(event.getEntity())) return;
             Player player = (Player) event.getEntity();
-            refreshFallenLimbSkins(player);
+            runOnClientOrNow(() -> refreshFallenLimbSkins(player));
 
             if (STATE.evasionActive) {
                 event.setCanceled(true);
-                performEvasionTeleport(player);
+                runOnClientOrNow(() -> performEvasionTeleport(player));
                 return;
             }
 
@@ -892,7 +892,7 @@ public class RickPrimeMod {
             if (!isLocalPlayer(event.getEntity())) return;
             Player player = (Player) event.getEntity();
             Player authPlayer = resolveAuthoritative(player);
-            refreshFallenLimbSkins(player);
+            runOnClientOrNow(() -> refreshFallenLimbSkins(player));
 
             if (STATE.evasionActive) {
                 event.setCanceled(true);
@@ -957,28 +957,32 @@ public class RickPrimeMod {
                         authPlayer.clearFire();
                         applyMovementPenalty(authPlayer);
                     });
-                    player.setAbsorptionAmount(0.0f);
-                    player.setHealth(2.0f);
-                    player.clearFire();
-                    STATE.isDown = true;
-                    if (limbsToLaunch >= 4) {
-                        STATE.isImmobilized = true;
+                    runOnClientOrNow(() -> {
+                        player.setAbsorptionAmount(0.0f);
+                        player.setHealth(2.0f);
+                        player.clearFire();
+                        STATE.isDown = true;
+                        if (limbsToLaunch >= 4) {
+                            STATE.isImmobilized = true;
+                        }
+                    });
+                }
+
+                runOnClientOrNow(() -> {
+                    launchLimbsCount(player, limbsToLaunch, true);
+                    applyMovementPenalty(player);
+
+                    if (STATE.isDown) {
+                        String msg = STATE.isImmobilized
+                                ? "¡Explosión directa! Salieron volando las 4 extremidades y quedaste inmóvil a 1 corazón. Presiona 'R'."
+                                : "¡Explosión! Quedaste a 1 corazón (inmortal). Presiona 'R' para regenerarte.";
+                        player.displayClientMessage(Component.literal("§4[Rick Prime] " + msg), true);
+                    } else if (limbsToLaunch > 0) {
+                        player.displayClientMessage(Component.literal(
+                                "§c[Rick Prime] ¡La explosión te quitó " + String.format("%.1f", heartsLost)
+                                        + " corazones e hizo volar " + limbsToLaunch + " extremidad(es)!"), true);
                     }
-                }
-
-                launchLimbsCount(player, limbsToLaunch, true);
-                applyMovementPenalty(player);
-
-                if (STATE.isDown) {
-                    String msg = STATE.isImmobilized
-                            ? "¡Explosión directa! Salieron volando las 4 extremidades y quedaste inmóvil a 1 corazón. Presiona 'R'."
-                            : "¡Explosión! Quedaste a 1 corazón (inmortal). Presiona 'R' para regenerarte.";
-                    player.displayClientMessage(Component.literal("§4[Rick Prime] " + msg), true);
-                } else if (limbsToLaunch > 0) {
-                    player.displayClientMessage(Component.literal(
-                            "§c[Rick Prime] ¡La explosión te quitó " + String.format("%.1f", heartsLost)
-                                    + " corazones e hizo volar " + limbsToLaunch + " extremidad(es)!"), true);
-                }
+                });
                 return;
             }
 
@@ -989,13 +993,15 @@ public class RickPrimeMod {
                     authPlayer.setHealth(2.0f);
                     applyMovementPenalty(authPlayer);
                 });
-                player.setAbsorptionAmount(0.0f);
-                player.setHealth(2.0f);
-                processLostHealthLimbs(player, actualTotalLost, false);
-                STATE.isDown = true;
-                applyMovementPenalty(player);
-                player.displayClientMessage(Component.literal(
-                        "§4[Rick Prime] ¡Caída severa! Quedaste a 1 corazón (inmortal). Presiona 'R' para regenerarte."), true);
+                runOnClientOrNow(() -> {
+                    player.setAbsorptionAmount(0.0f);
+                    player.setHealth(2.0f);
+                    processLostHealthLimbs(player, actualTotalLost, false);
+                    STATE.isDown = true;
+                    applyMovementPenalty(player);
+                    player.displayClientMessage(Component.literal(
+                            "§4[Rick Prime] ¡Caída severa! Quedaste a 1 corazón (inmortal). Presiona 'R' para regenerarte."), true);
+                });
                 return;
             }
 
@@ -1006,17 +1012,19 @@ public class RickPrimeMod {
                     authPlayer.setHealth(2.0f);
                     applyMovementPenalty(authPlayer);
                 });
-                player.setAbsorptionAmount(0.0f);
-                player.setHealth(2.0f);
-                processLostHealthLimbs(player, actualTotalLost, false);
-                STATE.isDown = true;
-                applyMovementPenalty(player);
-                player.displayClientMessage(Component.literal(
-                        "§4[Rick Prime] ¡Llegaste a 1 corazón! Eres inmortal. Presiona 'R' para regenerarte."), true);
+                runOnClientOrNow(() -> {
+                    player.setAbsorptionAmount(0.0f);
+                    player.setHealth(2.0f);
+                    processLostHealthLimbs(player, actualTotalLost, false);
+                    STATE.isDown = true;
+                    applyMovementPenalty(player);
+                    player.displayClientMessage(Component.literal(
+                            "§4[Rick Prime] ¡Llegaste a 1 corazón! Eres inmortal. Presiona 'R' para regenerarte."), true);
+                });
                 return;
             }
 
-            processLostHealthLimbs(player, effectiveDamage, false);
+            runOnClientOrNow(() -> processLostHealthLimbs(player, effectiveDamage, false));
         }
 
         @SubscribeEvent
@@ -1034,8 +1042,8 @@ public class RickPrimeMod {
                     foodData.eat(2, 0.3f);
                 });
             }
-            localPlayer.displayClientMessage(Component.literal(
-                    "§e[Rick Prime] Comida consumida (sin regenerar vida ni extremidades)."), true);
+            runOnClientOrNow(() -> localPlayer.displayClientMessage(Component.literal(
+                    "§e[Rick Prime] Comida consumida (sin regenerar vida ni extremidades)."), true));
         }
 
         private static void launchLimbsCount(Player player, int count, boolean flyingOut) {
@@ -1405,7 +1413,6 @@ public class RickPrimeMod {
             double nextY = limb.worldPos.y + limb.velocity.y;
             double nextZ = limb.worldPos.z + limb.velocity.z;
 
-            // Colisión horizontal contra bloques sólidos
             BlockPos sidePos = BlockPos.containing(nextX, limb.worldPos.y + 0.1, nextZ);
             BlockState sideState = player.level().getBlockState(sidePos);
             double velX = limb.velocity.x;
@@ -1417,10 +1424,14 @@ public class RickPrimeMod {
                 nextZ = limb.worldPos.z + velZ;
             }
 
+            limb.velocity = new Vec3(velX, limb.velocity.y, velZ);
+
             BlockPos belowPos = BlockPos.containing(nextX, nextY - 0.12, nextZ);
             BlockState belowState = player.level().getBlockState(belowPos);
-            boolean hasFloor = !belowState.getCollisionShape(player.level(), belowPos).isEmpty();
-            double floorTopY = belowPos.getY() + 1.0;
+            VoxelShape belowShape = belowState.getCollisionShape(player.level(), belowPos);
+            boolean hasFloor = !belowShape.isEmpty();
+            double shapeTop = hasFloor ? belowShape.max(Direction.Axis.Y) : 1.0;
+            double floorTopY = belowPos.getY() + shapeTop;
             boolean landingOnFloor = hasFloor && limb.velocity.y <= 0.0 && nextY <= floorTopY + 0.05;
 
             double velY = limb.velocity.y;
