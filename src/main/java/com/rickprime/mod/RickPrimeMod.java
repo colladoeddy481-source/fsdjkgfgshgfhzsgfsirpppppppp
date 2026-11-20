@@ -24,7 +24,6 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.DamageTypeTags;
-import net.minecraft.util.RandomSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageTypes;
@@ -90,7 +89,6 @@ public class RickPrimeMod {
     public static final String MODID = "rickprime";
 
     private static final ResourceLocation DEFAULT_STEVE_SKIN = new ResourceLocation("textures/entity/steve.png");
-    private static final ResourceLocation RICK_PRIME_SKIN = new ResourceLocation(MODID, "textures/entity/rick_prime.png");
 
     private static final int MAX_DRONES = 10;
     private static final int DRONES_PER_SUMMON = 1;
@@ -103,8 +101,6 @@ public class RickPrimeMod {
     private static final int RED_BEAM_CHARGE_TICKS = 60 * 20;
     private static final int RED_BEAM_VISUAL_TICKS = 8;
     private static final double RED_BEAM_MAX_RANGE = 32.0;
-
-    private static final int AFTERIMAGE_MAX_AGE = 14;
 
     public RickPrimeMod() {
     }
@@ -171,17 +167,6 @@ public class RickPrimeMod {
         }
     }
 
-    private static class EvasionAfterimage {
-        final Vec3 pos;
-        final float yaw;
-        int age = 0;
-
-        EvasionAfterimage(Vec3 pos, float yaw) {
-            this.pos = pos;
-            this.yaw = yaw;
-        }
-    }
-
     private static class BodyState {
         int partsLost = 0;
         float healthLostAccumulated = 0.0f;
@@ -194,7 +179,6 @@ public class RickPrimeMod {
         final List<FallenLimb> fallenLimbs = new ArrayList<>();
         final List<PrimeDrone> activeDrones = new ArrayList<>();
         final List<RedBeamEffect> activeBeams = new ArrayList<>();
-        final List<EvasionAfterimage> afterimages = new ArrayList<>();
 
         int droneCooldownTicksLeft = 0;
         int redBeamChargeTicks = 0;
@@ -214,7 +198,6 @@ public class RickPrimeMod {
             fallenLimbs.clear();
             activeDrones.clear();
             activeBeams.clear();
-            afterimages.clear();
             droneCooldownTicksLeft = 0;
             redBeamChargeTicks = 0;
             evasionChargeTicks = 0;
@@ -274,6 +257,7 @@ public class RickPrimeMod {
         int barHeight = 4;
         int x = width - barWidth - 12;
 
+        // 1. Barra de Rayo (arriba en la esquina inferior derecha)
         int beamY = height - 36;
         float beamPct = Math.max(0f, Math.min(1f, STATE.redBeamChargeTicks / (float) RED_BEAM_CHARGE_TICKS));
         boolean beamReady = STATE.redBeamChargeTicks >= RED_BEAM_CHARGE_TICKS;
@@ -285,6 +269,7 @@ public class RickPrimeMod {
             guiGraphics.fill(x, beamY, x + beamFilled, beamY + barHeight, beamColor);
         }
 
+        // 2. Barra de Drones (en medio en la esquina inferior derecha)
         int droneY = height - 28;
         float droneReadyPct;
         int droneColor;
@@ -303,6 +288,7 @@ public class RickPrimeMod {
             guiGraphics.fill(x, droneY, x + droneFilled, droneY + barHeight, droneColor);
         }
 
+        // 3. Barra de Evasión (abajo en la esquina inferior derecha)
         int evasionY = height - 20;
         float evasionPct;
         int evasionColor;
@@ -439,14 +425,6 @@ public class RickPrimeMod {
             return DEFAULT_STEVE_SKIN;
         }
 
-        private static ResourceLocation resolveRickPrimeSkin(Player fallbackPlayer) {
-            var resourceOpt = Minecraft.getInstance().getResourceManager().getResource(RICK_PRIME_SKIN);
-            if (resourceOpt.isPresent()) {
-                return RICK_PRIME_SKIN;
-            }
-            return resolvePlayerSkin(fallbackPlayer);
-        }
-
         private static void refreshFallenLimbSkins(Player player) {
             ResourceLocation skin = resolvePlayerSkin(player);
             for (FallenLimb limb : STATE.fallenLimbs) {
@@ -480,24 +458,6 @@ public class RickPrimeMod {
                     ignoreEntity
             ));
             return hit.getType() == HitResult.Type.MISS;
-        }
-
-        private static void spawnAfterimage(Vec3 pos, float yaw) {
-            if (STATE.afterimages.size() >= 8) {
-                STATE.afterimages.remove(0);
-            }
-            STATE.afterimages.add(new EvasionAfterimage(pos, yaw));
-        }
-
-        private static void updateEvasionAfterimages(Player clientPlayer) {
-            STATE.afterimages.removeIf(img -> {
-                img.age++;
-                return img.age >= AFTERIMAGE_MAX_AGE;
-            });
-
-            if (STATE.evasionActive && clientPlayer.getDeltaMovement().horizontalDistanceSqr() > 0.002 && clientTickCounter % 3 == 0) {
-                spawnAfterimage(clientPlayer.position(), clientPlayer.getYRot());
-            }
         }
 
         private static boolean tryFireRedBeam(Player clientPlayer) {
@@ -665,7 +625,7 @@ public class RickPrimeMod {
             return new Vec3(xOffset, yOffset, zOffset);
         }
 
-        private static Vec3 pickDroneAimPoint(LivingEntity target, RandomSource random, int tick) {
+        private static Vec3 pickDroneAimPoint(LivingEntity target, Random random, int tick) {
             double baseY = target.getY();
             double h = Math.max(0.4, target.getBbHeight());
             int zoneRoll = Math.floorMod(tick + random.nextInt(3), 5);
@@ -845,7 +805,7 @@ public class RickPrimeMod {
         public static void onLivingChangeTarget(LivingChangeTargetEvent event) {
             Player player = Minecraft.getInstance().player;
             if (player == null) return;
-            LivingEntity newTarget = event.getNewAboutToBeSetTarget();
+            LivingEntity newTarget = event.getTarget();
             if (newTarget == null || newTarget.getId() != player.getId()) return;
 
             if (shouldMobStopAttacking(event.getEntity(), player)) {
@@ -1314,7 +1274,6 @@ public class RickPrimeMod {
         private static void performEvasionTeleport(Player clientPlayer) {
             Player real = resolveAuthoritative(clientPlayer);
             Vec3 oldPos = real.position();
-            spawnAfterimage(oldPos, real.getYRot());
 
             double angle = real.getRandom().nextDouble() * Math.PI * 2.0;
             double dist = 4.0 + real.getRandom().nextDouble() * 2.0;
@@ -1381,7 +1340,6 @@ public class RickPrimeMod {
                     STATE.evasionActive = true;
                     STATE.evasionActiveTicksLeft = EVASION_DURATION_TICKS;
                     STATE.evasionChargeTicks = 0;
-                    spawnAfterimage(player.position(), player.getYRot());
                     player.displayClientMessage(Component.literal(
                             "§b[Rick Prime] ¡Evasión activada por 30s!"), true);
                 }
@@ -1483,7 +1441,6 @@ public class RickPrimeMod {
             clientTickCounter++;
             refreshFallenLimbSkins(player);
             updateDrones(player);
-            updateEvasionAfterimages(player);
 
             if (STATE.redBeamChargeTicks < RED_BEAM_CHARGE_TICKS) {
                 STATE.redBeamChargeTicks++;
@@ -1665,14 +1622,6 @@ public class RickPrimeMod {
                 }
             }
 
-            if (player != null && !STATE.afterimages.isEmpty()) {
-                ResourceLocation primeTex = ForgeClientEvents.resolveRickPrimeSkin(player);
-                for (EvasionAfterimage img : STATE.afterimages) {
-                    renderAfterimage(img, primeTex, poseStack, bufferSource, camPos);
-                }
-                bufferSource.endBatch(RenderType.entityTranslucent(primeTex));
-            }
-
             boolean drewTranslucentDefault = false;
             if (player != null && !STATE.activeDrones.isEmpty()) {
                 for (PrimeDrone drone : STATE.activeDrones) {
@@ -1696,48 +1645,6 @@ public class RickPrimeMod {
             if (drewTranslucentDefault) {
                 bufferSource.endBatch(RenderType.entityTranslucent(DEFAULT_STEVE_SKIN));
             }
-        }
-
-        private static void renderAfterimage(EvasionAfterimage img, ResourceLocation tex,
-                                             PoseStack poseStack, MultiBufferSource.BufferSource bufferSource,
-                                             Vec3 camPos) {
-            float lifeRatio = Math.max(0.0f, 1.0f - (img.age / (float) AFTERIMAGE_MAX_AGE));
-            float alpha = 0.65f * lifeRatio;
-
-            model.head.xRot = 0; model.head.yRot = 0; model.head.zRot = 0;
-            model.body.xRot = 0; model.body.yRot = 0; model.body.zRot = 0;
-            model.rightArm.xRot = -0.7f; model.rightArm.yRot = 0; model.rightArm.zRot = 0;
-            model.leftArm.xRot = 0.7f;   model.leftArm.yRot = 0; model.leftArm.zRot = 0;
-            model.rightLeg.xRot = 0.6f;  model.rightLeg.yRot = 0; model.rightLeg.zRot = 0;
-            model.leftLeg.xRot = -0.6f;  model.leftLeg.yRot = 0; model.leftLeg.zRot = 0;
-
-            model.head.visible = true;
-            model.hat.visible = true;
-            model.body.visible = true;
-            model.jacket.visible = true;
-            model.rightArm.visible = true;
-            model.leftArm.visible = true;
-            model.rightLeg.visible = true;
-            model.leftLeg.visible = true;
-            model.rightSleeve.visible = true;
-            model.leftSleeve.visible = true;
-            model.rightPants.visible = true;
-            model.leftPants.visible = true;
-
-            poseStack.pushPose();
-            poseStack.translate(img.pos.x - camPos.x, img.pos.y - camPos.y, img.pos.z - camPos.z);
-            poseStack.mulPose(Axis.YP.rotationDegrees(img.yaw));
-            poseStack.scale(-1.0f, -1.0f, 1.0f);
-            poseStack.translate(0, -1.5, 0);
-
-            var buffer = bufferSource.getBuffer(RenderType.entityTranslucent(tex));
-            int argb = ((int) (alpha * 255.0f) << 24) | 0x45D5FF;
-            float r = ((argb >> 16) & 0xFF) / 255.0f;
-            float g = ((argb >> 8) & 0xFF) / 255.0f;
-            float b = (argb & 0xFF) / 255.0f;
-            model.renderToBuffer(poseStack, buffer, 15728880, OverlayTexture.NO_OVERLAY, r, g, b, alpha);
-
-            poseStack.popPose();
         }
 
         private static void renderRedBeam(RedBeamEffect beam, PoseStack poseStack,
