@@ -174,6 +174,7 @@ public class RickPrimeMod {
         int droneCooldownTicksLeft = 0;
         int redBeamChargeTicks = 0;
 
+        // Evasión (teletransporte): barra que carga en 3 min, activa dura 30 s.
         int evasionChargeTicks = 0;
         boolean evasionActive = false;
         int evasionActiveTicksLeft = 0;
@@ -220,7 +221,7 @@ public class RickPrimeMod {
             new AttributeModifier(SPEED_MODIFIER_ID, "rickprime.immobile_speed", -1.0, AttributeModifier.Operation.MULTIPLY_TOTAL);
 
     private static final int EVASION_FULL_CHARGE_TICKS = 3 * 60 * 20;
-    private static final int EVASION_DURATION_TICKS = 1 * 60 * 20;
+    private static final int EVASION_DURATION_TICKS = 30 * 20;
 
     private static final IGuiOverlay EVASION_BAR_OVERLAY = (gui, guiGraphics, partialTick, width, height) ->
             renderHudBars(guiGraphics, width, height);
@@ -1038,7 +1039,7 @@ public class RickPrimeMod {
                     STATE.evasionActiveTicksLeft = EVASION_DURATION_TICKS;
                     STATE.evasionChargeTicks = 0;
                     player.displayClientMessage(Component.literal(
-                            "§b[Rick Prime] ¡Evasión activada! Esquivarás ataques teletransportándote."), true);
+                            "§b[Rick Prime] ¡Evasión activada por 30s! Esquivarás ataques teletransportándote."), true);
                 }
             }
 
@@ -1365,13 +1366,6 @@ public class RickPrimeMod {
             poseStack.popPose();
         }
 
-        /**
-         * Diseño detallado de los drones de Rick Prime según la referencia:
-         * - Doble tono metálico (gris-acero oscuro en el chasis y gris-celeste claro en placas/cuernos)
-         * - Dos puntas/cuernos superiores altos separados por un canal central marcado
-         * - Aletas laterales, pómulos angulares, quijada con segmentos inferiores y sensor celeste
-         * - Núcleo / lente central naranja-rojizo con gradiente de brillo y escala uniforme idéntica en todos
-         */
         private static void renderDrone(PrimeDrone drone, PoseStack poseStack,
                                         MultiBufferSource.BufferSource bufferSource, Vec3 camPos) {
             poseStack.pushPose();
@@ -1384,39 +1378,31 @@ public class RickPrimeMod {
 
             float pulse = 0.88f + 0.12f * (float) Math.sin(drone.ageTicks * 0.35f);
 
-            // Chasis central (gris acero oscuro) y placa frontal (gris-celeste claro)
             addBox(consumer, mat, -0.17f, -0.14f, -0.10f,  0.17f,  0.15f, 0.11f, 0.50f, 0.56f, 0.64f, 0.98f);
             addBox(consumer, mat, -0.14f, -0.12f,  0.09f,  0.14f,  0.14f, 0.13f, 0.74f, 0.83f, 0.92f, 0.98f);
 
-            // Dos cuernos / puntas superiores con bisel claro y canal central
             addBox(consumer, mat, -0.23f,  0.13f, -0.09f, -0.09f,  0.35f, 0.10f, 0.62f, 0.70f, 0.79f, 0.98f);
             addBox(consumer, mat, -0.21f,  0.15f,  0.05f, -0.11f,  0.34f, 0.12f, 0.80f, 0.88f, 0.96f, 0.98f);
 
             addBox(consumer, mat,  0.09f,  0.13f, -0.09f,  0.23f,  0.35f, 0.10f, 0.62f, 0.70f, 0.79f, 0.98f);
             addBox(consumer, mat,  0.11f,  0.15f,  0.05f,  0.21f,  0.34f, 0.12f, 0.80f, 0.88f, 0.96f, 0.98f);
 
-            // Puente superior entre cuernos (más bajo, formando el hueco característico)
             addBox(consumer, mat, -0.09f,  0.12f, -0.08f,  0.09f,  0.19f, 0.09f, 0.55f, 0.63f, 0.72f, 0.96f);
 
-            // Pómulos angulares y aletas laterales superiores
             addBox(consumer, mat, -0.27f, -0.02f, -0.08f, -0.16f,  0.10f, 0.09f, 0.72f, 0.82f, 0.91f, 0.97f);
             addBox(consumer, mat,  0.16f, -0.02f, -0.08f,  0.27f,  0.10f, 0.09f, 0.72f, 0.82f, 0.91f, 0.97f);
 
-            // Aletas laterales inferiores extendidas (celeste-gris)
             addBox(consumer, mat, -0.35f, -0.11f, -0.07f, -0.17f, -0.01f, 0.07f, 0.48f, 0.74f, 0.89f, 0.96f);
             addBox(consumer, mat,  0.17f, -0.11f, -0.07f,  0.35f, -0.01f, 0.07f, 0.48f, 0.74f, 0.89f, 0.96f);
 
-            // Sección inferior con aletas y mandíbula segmentada
             addBox(consumer, mat, -0.25f, -0.25f, -0.08f, -0.11f, -0.14f, 0.08f, 0.44f, 0.71f, 0.86f, 0.96f);
             addBox(consumer, mat,  0.11f, -0.25f, -0.08f,  0.25f, -0.14f, 0.08f, 0.44f, 0.71f, 0.86f, 0.96f);
             addBox(consumer, mat, -0.11f, -0.27f, -0.07f,  0.11f, -0.15f, 0.07f, 0.36f, 0.56f, 0.72f, 0.96f);
             addBox(consumer, mat, -0.07f, -0.26f,  0.05f, -0.01f, -0.18f, 0.09f, 0.62f, 0.86f, 0.98f, 0.98f);
             addBox(consumer, mat,  0.01f, -0.26f,  0.05f,  0.07f, -0.18f, 0.09f, 0.62f, 0.86f, 0.98f, 0.98f);
 
-            // Pequeño sensor circular celeste arriba del núcleo
             addBox(consumer, mat, -0.035f, 0.085f, 0.125f, 0.035f, 0.145f, 0.155f, 0.35f, 0.88f, 1.00f, 1.00f);
 
-            // Núcleo / ojo central naranja-rojizo multicapa (borde rojo, cuerpo naranja, centro brillante)
             addBox(consumer, mat, -0.125f, -0.115f, 0.115f,  0.125f,  0.085f, 0.150f, 0.85f * pulse, 0.14f, 0.05f, 0.98f);
             addBox(consumer, mat, -0.100f, -0.095f, 0.135f,  0.100f,  0.065f, 0.168f, 1.00f * pulse, 0.42f * pulse, 0.08f, 1.00f);
             addBox(consumer, mat, -0.055f, -0.055f, 0.155f,  0.055f,  0.030f, 0.180f, 1.00f, 0.76f * pulse, 0.25f, 1.00f);
