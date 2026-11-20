@@ -19,6 +19,7 @@ import net.minecraft.client.renderer.entity.layers.ItemInHandLayer;
 import net.minecraft.client.renderer.entity.layers.RenderLayer;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.particles.DustParticleOptions;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
@@ -41,6 +42,10 @@ import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.food.FoodData;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.InputEvent;
@@ -63,12 +68,14 @@ import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.joml.Matrix4f;
+import org.joml.Vector3f;
 import org.lwjgl.glfw.GLFW;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
 
@@ -83,6 +90,10 @@ public class RickPrimeMod {
     private static final int DRONE_COOLDOWN_TICKS = 15 * 20;
     private static final int DRONE_LIFETIME_TICKS = 12 * 20;
     private static final float DRONE_UNIFORM_SCALE = 1.0f;
+
+    private static final int RED_BEAM_CHARGE_TICKS = 60 * 20; // 1 minuto para cargar
+    private static final int RED_BEAM_VISUAL_TICKS = 8;
+    private static final double RED_BEAM_MAX_RANGE = 32.0;
 
     public RickPrimeMod() {
     }
@@ -136,6 +147,17 @@ public class RickPrimeMod {
         }
     }
 
+    private static class RedBeamEffect {
+        final Vec3 start;
+        final Vec3 end;
+        int ticksLeft = RED_BEAM_VISUAL_TICKS;
+
+        RedBeamEffect(Vec3 start, Vec3 end) {
+            this.start = start;
+            this.end = end;
+        }
+    }
+
     private static class BodyState {
         int partsLost = 0;
         float healthLostAccumulated = 0.0f;
@@ -147,8 +169,10 @@ public class RickPrimeMod {
         static final int SHIELD_IDLE_TIMEOUT_TICKS = 40;
         final List<FallenLimb> fallenLimbs = new ArrayList<>();
         final List<PrimeDrone> activeDrones = new ArrayList<>();
+        final List<RedBeamEffect> activeBeams = new ArrayList<>();
 
         int droneCooldownTicksLeft = 0;
+        int redBeamChargeTicks = 0;
 
         // Evasión (teletransporte): barra que carga en 3 min, activa dura 1 min.
         int evasionChargeTicks = 0;
@@ -207,6 +231,7 @@ public class RickPrimeMod {
         int barHeight = 4;
         int x = width / 2 - barWidth / 2;
 
+        // 1) Barra de evasión
         int evasionY = height - 54;
         float evasionPct;
         int evasionColor;
@@ -225,6 +250,7 @@ public class RickPrimeMod {
             guiGraphics.fill(x, evasionY, x + evasionFilled, evasionY + barHeight, evasionColor);
         }
 
+        // 2) Barra de robots
         int droneY = height - 62;
         float droneReadyPct;
         int droneColor;
@@ -241,6 +267,18 @@ public class RickPrimeMod {
         int droneFilled = (int) (barWidth * droneReadyPct);
         if (droneFilled > 0) {
             guiGraphics.fill(x, droneY, x + droneFilled, droneY + barHeight, droneColor);
+        }
+
+        // 3) Barra de rayo rojo (1 minuto de carga; rojo brillante al estar llena)
+        int beamY = height - 70;
+        float beamPct = Math.max(0f, Math.min(1f, STATE.redBeamChargeTicks / (float) RED_BEAM_CHARGE_TICKS));
+        boolean beamReady = STATE.redBeamChargeTicks >= RED_BEAM_CHARGE_TICKS;
+        int beamColor = beamReady ? 0xFFFF2222 : 0xFF991111;
+
+        guiGraphics.fill(x - 1, beamY - 1, x + barWidth + 1, beamY + barHeight + 1, 0x80000000);
+        int beamFilled = (int) (barWidth * beamPct);
+        if (beamFilled > 0) {
+            guiGraphics.fill(x, beamY, x + beamFilled, beamY + barHeight, beamColor);
         }
     }
 
@@ -314,6 +352,111 @@ public class RickPrimeMod {
             for (FallenLimb limb : STATE.fallenLimbs) {
                 if (limb.skin == null || limb.skin.equals(DEFAULT_STEVE_SKIN)) {
                     limb.skin = skin;
+                }
+            }
+        }
+
+        private static boolean tryFireRedBeam(Player clientPlayer) {
+            if (STATE.armDetached(BodyPart.RIGHT_ARM)) {
+                clientPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Tu brazo derecho está caído! No puedes disparar el rayo."), true);
+                return false;
+            }
+            if (STATE.redBeamChargeTicks < RED_BEAM_CHARGE_TICKS) {
+                return false;
+            }
+
+            Player realPlayer = resolveAuthoritative(clientPlayer);
+            Vec3 eyePos = realPlayer.getEyePosition(1.0f);
+            Vec3 lookVec = realPlayer.getLookAngle().normalize();
+            Vec3 maxEnd = eyePos.add(lookVec.scale(RED_BEAM_MAX_RANGE));
+
+            BlockHitResult blockHit = realPlayer.level().clip(new ClipContext(
+                    eyePos,
+                    maxEnd,
+                    ClipContext.Block.OUTLINE,
+                    ClipContext.Fluid.NONE,
+                    realPlayer
+            ));
+            double blockDistSq = blockHit.getType() != HitResult.Type.MISS
+                    ? eyePos.distanceToSqr(blockHit.getLocation())
+                    : RED_BEAM_MAX_RANGE * RED_BEAM_MAX_RANGE;
+
+            AABB searchBox = realPlayer.getBoundingBox().expandTowards(lookVec.scale(RED_BEAM_MAX_RANGE)).inflate(1.2);
+            List<Mob> candidateMobs = realPlayer.level().getEntitiesOfClass(
+                    Mob.class,
+                    searchBox,
+                    m -> m != null && m.isAlive() && m.getId() != realPlayer.getId()
+            );
+
+            Mob hitMob = null;
+            Vec3 hitPos = null;
+            double bestDistSq = blockDistSq;
+
+            for (Mob mob : candidateMobs) {
+                AABB mobBox = mob.getBoundingBox().inflate(0.25);
+                Optional<Vec3> clip = mobBox.clip(eyePos, maxEnd);
+                if (clip.isPresent()) {
+                    double dSq = eyePos.distanceToSqr(clip.get());
+                    if (dSq < bestDistSq) {
+                        bestDistSq = dSq;
+                        hitMob = mob;
+                        hitPos = clip.get();
+                    }
+                }
+            }
+
+            Vec3 finalEnd;
+            if (hitMob != null && hitPos != null) {
+                finalEnd = hitPos;
+                applyZoneDamageToMob(realPlayer, hitMob, hitPos);
+            } else if (blockHit.getType() != HitResult.Type.MISS) {
+                finalEnd = blockHit.getLocation();
+            } else {
+                finalEnd = maxEnd;
+            }
+
+            Vec3 beamOrigin = realPlayer.position().add(lookVec.x * 0.6, 1.35, lookVec.z * 0.6);
+            STATE.activeBeams.add(new RedBeamEffect(beamOrigin, finalEnd));
+            spawnRedBeamParticles(realPlayer, beamOrigin, finalEnd);
+
+            STATE.redBeamChargeTicks = 0;
+            return true;
+        }
+
+        private static void applyZoneDamageToMob(Player attacker, Mob targetMob, Vec3 hitPos) {
+            double baseY = targetMob.getY();
+            double height = Math.max(0.4, targetMob.getBbHeight());
+            double relativeHeight = (hitPos.y - baseY) / height;
+
+            if (relativeHeight >= 0.78) {
+                targetMob.hurt(attacker.level().damageSources().playerAttack(attacker), targetMob.getMaxHealth() * 100.0f + 999.0f);
+                if (targetMob.isAlive()) {
+                    targetMob.kill();
+                }
+                attacker.displayClientMessage(Component.literal("§4[Rayo Rojo] ¡Disparo en la cabeza! Eliminación instantánea."), true);
+            } else if (relativeHeight >= 0.35) {
+                targetMob.hurt(attacker.level().damageSources().playerAttack(attacker), 12.0f);
+                attacker.displayClientMessage(Component.literal("§c[Rayo Rojo] ¡Impacto en el torso! (-6 corazones)"), true);
+            } else {
+                targetMob.hurt(attacker.level().damageSources().playerAttack(attacker), 5.0f);
+                attacker.displayClientMessage(Component.literal("§e[Rayo Rojo] Impacto en las extremidades inferiores. (-2.5 corazones)"), true);
+            }
+        }
+
+        private static void spawnRedBeamParticles(Player player, Vec3 start, Vec3 end) {
+            DustParticleOptions redDust = new DustParticleOptions(new Vector3f(1.0f, 0.08f, 0.08f), 1.4f);
+            double dist = start.distanceTo(end);
+            int steps = Math.min(80, Math.max(8, (int) (dist * 4.0)));
+
+            for (int i = 0; i <= steps; i++) {
+                double t = i / (double) steps;
+                double px = start.x + (end.x - start.x) * t;
+                double py = start.y + (end.y - start.y) * t;
+                double pz = start.z + (end.z - start.z) * t;
+                if (player.level() instanceof ServerLevel serverLevel) {
+                    serverLevel.sendParticles(redDust, px, py, pz, 1, 0.02, 0.02, 0.02, 0.0);
+                } else {
+                    player.level().addParticle(redDust, px, py, pz, 0.0, 0.0, 0.0);
                 }
             }
         }
@@ -697,6 +840,11 @@ public class RickPrimeMod {
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null) return;
 
+            if (tryFireRedBeam(localPlayer)) {
+                event.setCanceled(true);
+                return;
+            }
+
             if (event.getHand() == InteractionHand.MAIN_HAND && STATE.armDetached(BodyPart.RIGHT_ARM)) {
                 event.setCanceled(true);
                 localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Tu brazo derecho está en el suelo!"), true);
@@ -704,6 +852,15 @@ public class RickPrimeMod {
                 event.setCanceled(true);
                 localPlayer.displayClientMessage(Component.literal("§c[Rick Prime] ¡Tu brazo izquierdo está en el suelo!"), true);
             }
+        }
+
+        @SubscribeEvent
+        public static void onRightClickEmpty(PlayerInteractEvent.RightClickEmpty event) {
+            if (!isLocalPlayer(event.getEntity())) return;
+            Player localPlayer = Minecraft.getInstance().player;
+            if (localPlayer == null) return;
+
+            tryFireRedBeam(localPlayer);
         }
 
         @SubscribeEvent
@@ -957,6 +1114,15 @@ public class RickPrimeMod {
             refreshFallenLimbSkins(player);
             updateDrones(player);
 
+            if (STATE.redBeamChargeTicks < RED_BEAM_CHARGE_TICKS) {
+                STATE.redBeamChargeTicks++;
+            }
+
+            STATE.activeBeams.removeIf(b -> {
+                b.ticksLeft--;
+                return b.ticksLeft <= 0;
+            });
+
             if (STATE.droneCooldownTicksLeft > 0) {
                 STATE.droneCooldownTicksLeft--;
             }
@@ -1164,19 +1330,45 @@ public class RickPrimeMod {
                 bufferSource.endBatch(RenderType.translucent());
             }
 
+            if (!STATE.activeBeams.isEmpty()) {
+                for (RedBeamEffect beam : STATE.activeBeams) {
+                    renderRedBeam(beam, poseStack, bufferSource, camPos);
+                }
+                bufferSource.endBatch(RenderType.translucent());
+            }
+
             if (player != null && STATE.orangeShieldCooldownTicks > 0) {
                 renderOrangeCircularShield(player, poseStack, bufferSource, camPos, event.getPartialTick());
                 bufferSource.endBatch(RenderType.translucent());
             }
         }
 
-        /**
-         * Forma angular de los drones de Rick Prime (imagen):
-         * - Chasis principal gris/celeste con dos cuernos/puntas superiores
-         * - Aletas laterales inferiores y mandíbula inferior
-         * - Sensor superior celeste y núcleo/ojo central naranja-rojizo brillante
-         * - Escala fija uniforme para todos los robots.
-         */
+        private static void renderRedBeam(RedBeamEffect beam, PoseStack poseStack,
+                                          MultiBufferSource.BufferSource bufferSource, Vec3 camPos) {
+            Vec3 delta = beam.end.subtract(beam.start);
+            double length = delta.length();
+            if (length < 0.001) return;
+
+            Vec3 dir = delta.normalize();
+            float yaw = (float) (Math.atan2(dir.x, dir.z) * (180.0 / Math.PI));
+            float pitch = (float) (-Math.asin(Math.max(-1.0, Math.min(1.0, dir.y))) * (180.0 / Math.PI));
+            float alpha = Math.min(0.95f, (beam.ticksLeft / (float) RED_BEAM_VISUAL_TICKS) * 0.95f);
+
+            poseStack.pushPose();
+            poseStack.translate(beam.start.x - camPos.x, beam.start.y - camPos.y, beam.start.z - camPos.z);
+            poseStack.mulPose(Axis.YP.rotationDegrees(yaw));
+            poseStack.mulPose(Axis.XP.rotationDegrees(pitch));
+
+            Matrix4f mat = poseStack.last().pose();
+            VertexConsumer consumer = bufferSource.getBuffer(RenderType.translucent());
+            float halfW = 0.065f;
+            float len = (float) length;
+
+            addBox(consumer, mat, -halfW, -halfW, 0.0f, halfW, halfW, len, 1.0f, 0.08f, 0.08f, alpha);
+
+            poseStack.popPose();
+        }
+
         private static void renderDrone(PrimeDrone drone, PoseStack poseStack,
                                         MultiBufferSource.BufferSource bufferSource, Vec3 camPos) {
             poseStack.pushPose();
@@ -1187,21 +1379,15 @@ public class RickPrimeMod {
             Matrix4f mat = poseStack.last().pose();
             VertexConsumer consumer = bufferSource.getBuffer(RenderType.translucent());
 
-            // Cuerpo / máscara central gris-azulado
             addBox(consumer, mat, -0.18f, -0.14f, -0.10f,  0.18f,  0.16f, 0.12f, 0.68f, 0.74f, 0.80f, 0.96f);
-            // Cuerno/punta superior izquierda y derecha
             addBox(consumer, mat, -0.22f,  0.14f, -0.09f, -0.08f,  0.34f, 0.10f, 0.76f, 0.84f, 0.92f, 0.96f);
             addBox(consumer, mat,  0.08f,  0.14f, -0.09f,  0.22f,  0.34f, 0.10f, 0.76f, 0.84f, 0.92f, 0.96f);
-            // Aletas laterales
             addBox(consumer, mat, -0.32f, -0.06f, -0.08f, -0.16f,  0.05f, 0.08f, 0.52f, 0.74f, 0.88f, 0.95f);
             addBox(consumer, mat,  0.16f, -0.06f, -0.08f,  0.32f,  0.05f, 0.08f, 0.52f, 0.74f, 0.88f, 0.95f);
-            // Sección inferior con aletas
             addBox(consumer, mat, -0.24f, -0.25f, -0.08f, -0.10f, -0.14f, 0.08f, 0.45f, 0.72f, 0.86f, 0.95f);
             addBox(consumer, mat,  0.10f, -0.25f, -0.08f,  0.24f, -0.14f, 0.08f, 0.45f, 0.72f, 0.86f, 0.95f);
             addBox(consumer, mat, -0.09f, -0.26f, -0.07f,  0.09f, -0.15f, 0.07f, 0.35f, 0.78f, 0.92f, 0.95f);
-            // Sensor circular superior
             addBox(consumer, mat, -0.04f,  0.09f,  0.11f,  0.04f,  0.17f, 0.15f, 0.35f, 0.88f, 1.00f, 0.98f);
-            // Núcleo / lente central naranja-rojizo brillante
             addBox(consumer, mat, -0.10f, -0.10f,  0.10f,  0.10f,  0.08f, 0.17f, 1.00f, 0.42f, 0.08f, 1.00f);
 
             poseStack.popPose();
