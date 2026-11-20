@@ -257,7 +257,6 @@ public class RickPrimeMod {
         int barHeight = 4;
         int x = width - barWidth - 12;
 
-        // 1. Barra de Rayo (arriba en la esquina inferior derecha)
         int beamY = height - 36;
         float beamPct = Math.max(0f, Math.min(1f, STATE.redBeamChargeTicks / (float) RED_BEAM_CHARGE_TICKS));
         boolean beamReady = STATE.redBeamChargeTicks >= RED_BEAM_CHARGE_TICKS;
@@ -269,7 +268,6 @@ public class RickPrimeMod {
             guiGraphics.fill(x, beamY, x + beamFilled, beamY + barHeight, beamColor);
         }
 
-        // 2. Barra de Drones (en medio en la esquina inferior derecha)
         int droneY = height - 28;
         float droneReadyPct;
         int droneColor;
@@ -288,7 +286,6 @@ public class RickPrimeMod {
             guiGraphics.fill(x, droneY, x + droneFilled, droneY + barHeight, droneColor);
         }
 
-        // 3. Barra de Evasión (abajo en la esquina inferior derecha)
         int evasionY = height - 20;
         float evasionPct;
         int evasionColor;
@@ -1287,12 +1284,10 @@ public class RickPrimeMod {
                 return;
             }
 
-            spawnTeleportParticles(real, oldPos.x, oldPos.y + 1.0, oldPos.z);
             runOnServerOrNow(real, () -> real.teleportTo(nx, ny, nz));
             if (real.getId() != clientPlayer.getId()) {
                 clientPlayer.setPos(nx, ny, nz);
             }
-            spawnTeleportParticles(real, nx, ny + 1.0, nz);
 
             clientPlayer.displayClientMessage(Component.literal("§b[Rick Prime] ¡Evasión!"), true);
         }
