@@ -24,6 +24,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.DamageTypeTags;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageTypes;
@@ -664,7 +665,7 @@ public class RickPrimeMod {
             return new Vec3(xOffset, yOffset, zOffset);
         }
 
-        private static Vec3 pickDroneAimPoint(LivingEntity target, Random random, int tick) {
+        private static Vec3 pickDroneAimPoint(LivingEntity target, RandomSource random, int tick) {
             double baseY = target.getY();
             double h = Math.max(0.4, target.getBbHeight());
             int zoneRoll = Math.floorMod(tick + random.nextInt(3), 5);
@@ -844,7 +845,7 @@ public class RickPrimeMod {
         public static void onLivingChangeTarget(LivingChangeTargetEvent event) {
             Player player = Minecraft.getInstance().player;
             if (player == null) return;
-            LivingEntity newTarget = event.getTarget();
+            LivingEntity newTarget = event.getNewAboutToBeSetTarget();
             if (newTarget == null || newTarget.getId() != player.getId()) return;
 
             if (shouldMobStopAttacking(event.getEntity(), player)) {
