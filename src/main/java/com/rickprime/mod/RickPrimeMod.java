@@ -14,9 +14,6 @@ import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
-import net.minecraft.client.renderer.entity.LivingEntityRenderer;
-import net.minecraft.client.renderer.entity.layers.ItemInHandLayer;
-import net.minecraft.client.renderer.entity.layers.RenderLayer;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.DustParticleOptions;
@@ -72,7 +69,6 @@ import org.joml.Matrix4f;
 import org.joml.Vector3f;
 import org.lwjgl.glfw.GLFW;
 
-import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -148,6 +144,7 @@ public class RickPrimeMod {
         int ageTicks = 0;
         int ticksWithoutEnemy = 0;
         int attackCooldown = 0;
+        Vec3 lockedAimPoint = null;
 
         PrimeDrone(Vec3 pos, float yaw, int slotIndex) {
             this.pos = pos;
@@ -467,7 +464,7 @@ public class RickPrimeMod {
             Vec3 finalEnd;
             if (hitMob != null && hitPos != null) {
                 finalEnd = hitPos;
-                applyZoneDamageToMob(realPlayer, hitMob, hitPos, "Rayo Rojo");
+                applyZoneDamageToMob(clientPlayer, realPlayer, hitMob, hitPos, "Rayo Rojo");
             } else if (blockHit.getType() != HitResult.Type.MISS) {
                 finalEnd = blockHit.getLocation();
             } else {
@@ -482,23 +479,33 @@ public class RickPrimeMod {
             return true;
         }
 
-        private static void applyZoneDamageToMob(Player attacker, LivingEntity targetEntity, Vec3 hitPos, String sourceLabel) {
-            double baseY = targetEntity.getY();
-            double height = Math.max(0.4, targetEntity.getBbHeight());
+        private static void applyZoneDamageToMob(Player feedbackPlayer, Player attacker, LivingEntity targetEntity, Vec3 hitPos, String sourceLabel) {
+            if (targetEntity == null || !targetEntity.isAlive()) return;
+
+            LivingEntity authoritativeTarget = targetEntity;
+            if (attacker.level() instanceof ServerLevel serverLevel) {
+                Entity serverEntity = serverLevel.getEntity(targetEntity.getUUID());
+                if (serverEntity instanceof LivingEntity le) {
+                    authoritativeTarget = le;
+                }
+            }
+
+            double baseY = authoritativeTarget.getY();
+            double height = Math.max(0.4, authoritativeTarget.getBbHeight());
             double relativeHeight = (hitPos.y - baseY) / height;
 
             if (relativeHeight >= 0.78) {
-                targetEntity.hurt(attacker.level().damageSources().playerAttack(attacker), targetEntity.getMaxHealth() * 100.0f + 999.0f);
-                if (targetEntity.isAlive()) {
-                    targetEntity.kill();
+                authoritativeTarget.hurt(attacker.level().damageSources().playerAttack(attacker), authoritativeTarget.getMaxHealth() * 100.0f + 999.0f);
+                if (authoritativeTarget.isAlive()) {
+                    authoritativeTarget.kill();
                 }
-                attacker.displayClientMessage(Component.literal("§4[" + sourceLabel + "] ¡Disparo en la cabeza! Eliminación instantánea."), true);
+                feedbackPlayer.displayClientMessage(Component.literal("§4[" + sourceLabel + "] ¡Disparo en la cabeza! Eliminación instantánea."), true);
             } else if (relativeHeight >= 0.35) {
-                targetEntity.hurt(attacker.level().damageSources().playerAttack(attacker), 12.0f);
-                attacker.displayClientMessage(Component.literal("§c[" + sourceLabel + "] ¡Impacto en el torso! (-6 corazones)"), true);
+                authoritativeTarget.hurt(attacker.level().damageSources().playerAttack(attacker), 12.0f);
+                feedbackPlayer.displayClientMessage(Component.literal("§c[" + sourceLabel + "] ¡Impacto en el torso! (-6 corazones)"), true);
             } else {
-                targetEntity.hurt(attacker.level().damageSources().playerAttack(attacker), 5.0f);
-                attacker.displayClientMessage(Component.literal("§e[" + sourceLabel + "] Impacto en las extremidades inferiores. (-2.5 corazones)"), true);
+                authoritativeTarget.hurt(attacker.level().damageSources().playerAttack(attacker), 5.0f);
+                feedbackPlayer.displayClientMessage(Component.literal("§e[" + sourceLabel + "] Impacto en las extremidades inferiores. (-2.5 corazones)"), true);
             }
         }
 
@@ -560,11 +567,10 @@ public class RickPrimeMod {
         private static Vec3 pickDroneAimPoint(LivingEntity target, Random random, int tick) {
             double baseY = target.getY();
             double h = Math.max(0.4, target.getBbHeight());
-            // Alterna entre cabeza (~0.86h), torso (~0.52h) y piernas (~0.18h)
             int zoneRoll = Math.floorMod(tick + random.nextInt(3), 5);
             double heightFactor;
             if (zoneRoll == 0) {
-                heightFactor = 0.88; // Cabeza -> muerte instantánea
+                heightFactor = 0.88; // Cabeza -> eliminación instantánea
             } else if (zoneRoll <= 2) {
                 heightFactor = 0.52; // Torso
             } else {
@@ -598,43 +604,50 @@ public class RickPrimeMod {
             nearbyHostiles.sort(Comparator.comparingDouble(e -> e.distanceToSqr(realPlayer)));
 
             List<PrimeDrone> expired = new ArrayList<>();
-            int idx = 0;
-            for (PrimeDrone drone : STATE.activeDrones) {
+            for (int i = 0; i < STATE.activeDrones.size(); i++) {
+                PrimeDrone drone = STATE.activeDrones.get(i);
                 drone.ageTicks++;
                 if (drone.attackCooldown > 0) {
                     drone.attackCooldown--;
                 }
 
-                // Posición estática junto al jugador sin girar alrededor de él
-                Vec3 idlePos = clientPlayer.position().add(getStaticDroneOffset(idx));
-                idx++;
+                // Posición estática junto al jugador sin orbitar alrededor de él
+                Vec3 idlePos = clientPlayer.position().add(getStaticDroneOffset(drone.slotIndex));
+                drone.pos = drone.pos.lerp(idlePos, 0.25);
 
                 LivingEntity assignedTarget = null;
                 if (!nearbyHostiles.isEmpty()) {
-                    assignedTarget = nearbyHostiles.get((idx - 1) % nearbyHostiles.size());
+                    assignedTarget = nearbyHostiles.get(i % nearbyHostiles.size());
                 }
 
-                if (assignedTarget != null) {
+                if (assignedTarget != null && assignedTarget.isAlive()) {
                     drone.ticksWithoutEnemy = 0;
-                    // Mantiene su posición estable sin orbitar alrededor del jugador
-                    drone.pos = drone.pos.lerp(idlePos, 0.25);
 
-                    Vec3 aimPos = pickDroneAimPoint(assignedTarget, realPlayer.getRandom(), drone.ageTicks + idx);
-                    double dx = aimPos.x - drone.pos.x;
-                    double dz = aimPos.z - drone.pos.z;
+                    if (drone.lockedAimPoint == null) {
+                        drone.lockedAimPoint = pickDroneAimPoint(assignedTarget, realPlayer.getRandom(), drone.ageTicks + i);
+                    } else {
+                        // Actualiza X/Z del objetivo manteniendo la altura relativa elegida
+                        double relY = Math.max(0.1, Math.min(assignedTarget.getBbHeight(), drone.lockedAimPoint.y - assignedTarget.getY()));
+                        drone.lockedAimPoint = new Vec3(assignedTarget.getX(), assignedTarget.getY() + relY, assignedTarget.getZ());
+                    }
+
+                    double dx = drone.lockedAimPoint.x - drone.pos.x;
+                    double dz = drone.lockedAimPoint.z - drone.pos.z;
                     if (dx * dx + dz * dz > 0.0001) {
                         drone.yaw = (float) (Math.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0f;
                     }
 
                     if (drone.attackCooldown <= 0) {
                         drone.attackCooldown = 20;
-                        STATE.activeBeams.add(new RedBeamEffect(drone.pos, aimPos));
-                        spawnRedBeamParticles(realPlayer, drone.pos, aimPos);
-                        applyZoneDamageToMob(realPlayer, assignedTarget, aimPos, "Dron");
+                        Vec3 shotPoint = drone.lockedAimPoint;
+                        STATE.activeBeams.add(new RedBeamEffect(drone.pos, shotPoint));
+                        spawnRedBeamParticles(realPlayer, drone.pos, shotPoint);
+                        applyZoneDamageToMob(clientPlayer, realPlayer, assignedTarget, shotPoint, "Dron");
+                        drone.lockedAimPoint = null;
                     }
                 } else {
+                    drone.lockedAimPoint = null;
                     drone.ticksWithoutEnemy++;
-                    drone.pos = drone.pos.lerp(idlePos, 0.25);
                     drone.yaw = clientPlayer.getYRot();
 
                     if (drone.ticksWithoutEnemy >= DRONE_IDLE_TIMEOUT_TICKS) {
@@ -664,12 +677,18 @@ public class RickPrimeMod {
         }
 
         private static void clampPlayerToOneHeart(Player player) {
+            Player auth = resolveAuthoritative(player);
+            if (auth.getHealth() < 2.0f) {
+                auth.setHealth(2.0f);
+            }
             if (player.getHealth() < 2.0f) {
                 player.setHealth(2.0f);
             }
+            auth.setAbsorptionAmount(0.0f);
             player.setAbsorptionAmount(0.0f);
             STATE.isDown = true;
             applyMovementPenalty(player);
+            applyMovementPenalty(auth);
         }
 
         private static boolean shouldMobStopAttacking(Entity attacker, Player player) {
@@ -699,7 +718,7 @@ public class RickPrimeMod {
         public static void onLivingChangeTarget(LivingChangeTargetEvent event) {
             Player player = Minecraft.getInstance().player;
             if (player == null) return;
-            LivingEntity newTarget = event.getNewTarget();
+            LivingEntity newTarget = event.getTarget();
             if (newTarget == null || newTarget.getId() != player.getId()) return;
 
             if (shouldMobStopAttacking(event.getEntity(), player)) {
@@ -744,6 +763,7 @@ public class RickPrimeMod {
         public static void onPlayerHurt(LivingHurtEvent event) {
             if (!isLocalPlayer(event.getEntity())) return;
             Player player = (Player) event.getEntity();
+            Player authPlayer = resolveAuthoritative(player);
             refreshFallenLimbSkins(player);
 
             if (STATE.evasionActive) {
@@ -762,8 +782,8 @@ public class RickPrimeMod {
                 return;
             }
 
-            float currentHealth = player.getHealth();
-            float currentAbsorption = player.getAbsorptionAmount();
+            float currentHealth = authPlayer.getHealth();
+            float currentAbsorption = authPlayer.getAbsorptionAmount();
             float damage = event.getAmount();
 
             if (damage <= 0.0f) {
@@ -803,6 +823,8 @@ public class RickPrimeMod {
 
                 if (currentHealth - effectiveDamage <= 2.0f) {
                     event.setCanceled(true);
+                    authPlayer.setAbsorptionAmount(0.0f);
+                    authPlayer.setHealth(2.0f);
                     player.setAbsorptionAmount(0.0f);
                     player.setHealth(2.0f);
                     STATE.isDown = true;
@@ -813,6 +835,7 @@ public class RickPrimeMod {
 
                 launchLimbsCount(player, limbsToLaunch, true);
                 applyMovementPenalty(player);
+                applyMovementPenalty(authPlayer);
 
                 if (STATE.isDown) {
                     String msg = STATE.isImmobilized
@@ -829,11 +852,14 @@ public class RickPrimeMod {
 
             if (isFall && (effectiveDamage >= 18.0f || currentHealth - effectiveDamage <= 2.0f)) {
                 event.setCanceled(true);
+                authPlayer.setAbsorptionAmount(0.0f);
+                authPlayer.setHealth(2.0f);
                 player.setAbsorptionAmount(0.0f);
                 player.setHealth(2.0f);
                 processLostHealthLimbs(player, actualTotalLost, false);
                 STATE.isDown = true;
                 applyMovementPenalty(player);
+                applyMovementPenalty(authPlayer);
                 player.displayClientMessage(Component.literal(
                         "§4[Rick Prime] ¡Caída severa! Quedaste a 1 corazón (inmortal). Presiona 'R' para regenerarte."), true);
                 return;
@@ -841,11 +867,14 @@ public class RickPrimeMod {
 
             if (currentHealth - effectiveDamage <= 2.0f) {
                 event.setCanceled(true);
+                authPlayer.setAbsorptionAmount(0.0f);
+                authPlayer.setHealth(2.0f);
                 player.setAbsorptionAmount(0.0f);
                 player.setHealth(2.0f);
                 processLostHealthLimbs(player, actualTotalLost, false);
                 STATE.isDown = true;
                 applyMovementPenalty(player);
+                applyMovementPenalty(authPlayer);
                 player.displayClientMessage(Component.literal(
                         "§4[Rick Prime] ¡Llegaste a 1 corazón! Eres inmortal. Presiona 'R' para regenerarte."), true);
                 return;
@@ -858,12 +887,13 @@ public class RickPrimeMod {
         public static void onUseItemFinish(LivingEntityUseItemEvent.Finish event) {
             if (!isLocalPlayer(event.getEntity())) return;
             Player localPlayer = (Player) event.getEntity();
+            Player authPlayer = resolveAuthoritative(localPlayer);
 
             ItemStack stack = event.getItem();
             if (!stack.isEdible() || stack.getFoodProperties(localPlayer) == null) return;
 
             var foodProps = stack.getFoodProperties(localPlayer);
-            FoodData foodData = localPlayer.getFoodData();
+            FoodData foodData = authPlayer.getFoodData();
 
             int bonusNutrition = foodProps.getNutrition();
             float bonusSaturation = foodProps.getSaturationModifier();
@@ -1080,9 +1110,11 @@ public class RickPrimeMod {
                 player.displayClientMessage(Component.literal("§c[Rick Prime] ¡Perdiste " + partName + "!"), true);
             }
             applyMovementPenalty(player);
+            applyMovementPenalty(resolveAuthoritative(player));
         }
 
         private static void applyMovementPenalty(Player player) {
+            if (player == null) return;
             AttributeInstance speed = player.getAttribute(Attributes.MOVEMENT_SPEED);
             if (speed == null) return;
 
@@ -1100,6 +1132,7 @@ public class RickPrimeMod {
         }
 
         private static void clearMovementPenalty(Player player) {
+            if (player == null) return;
             AttributeInstance speed = player.getAttribute(Attributes.MOVEMENT_SPEED);
             if (speed != null) speed.removeModifier(SPEED_MODIFIER_ID);
         }
@@ -1117,9 +1150,12 @@ public class RickPrimeMod {
 
             spawnTeleportParticles(real, oldPos.x, oldPos.y + 1.0, oldPos.z);
             real.teleportTo(nx, ny, nz);
+            if (real.getId() != clientPlayer.getId()) {
+                clientPlayer.setPos(nx, ny, nz);
+            }
             spawnTeleportParticles(real, nx, ny + 1.0, nz);
 
-            real.displayClientMessage(Component.literal("§b[Rick Prime] ¡Evasión!"), true);
+            clientPlayer.displayClientMessage(Component.literal("§b[Rick Prime] ¡Evasión!"), true);
         }
 
         private static void spawnTeleportParticles(Player player, double x, double y, double z) {
@@ -1175,6 +1211,9 @@ public class RickPrimeMod {
         }
 
         private static void startRegeneration(Player player) {
+            Player authPlayer = resolveAuthoritative(player);
+            float maxHp = authPlayer.getMaxHealth();
+            STATE.originalMaxHealth = maxHp > 0.0f ? maxHp : 20.0f;
             STATE.regenerating = true;
             refreshFallenLimbSkins(player);
             for (FallenLimb limb : STATE.fallenLimbs) {
@@ -1215,7 +1254,7 @@ public class RickPrimeMod {
             }
 
             double finalY = onGround && limb.velocity.y <= 0.0
-                    ? Math.max(limb.worldPos.y, belowPos.getY() + 1.08)
+                    ? Math.max(limb.worldPos.y, belowPos.getY() + 1.0)
                     : limb.worldPos.y + limb.velocity.y;
 
             limb.worldPos = new Vec3(
@@ -1292,56 +1331,39 @@ public class RickPrimeMod {
             }
 
             Player realPlayer = resolveAuthoritative(player);
-            float healPerTick = (STATE.originalMaxHealth - 2.0f) / FallenLimb.RETURN_DURATION;
-            if (realPlayer.getHealth() < STATE.originalMaxHealth) {
-                realPlayer.setHealth(Math.min(STATE.originalMaxHealth, realPlayer.getHealth() + healPerTick));
+            float targetMaxHp = Math.max(20.0f, Math.max(STATE.originalMaxHealth, realPlayer.getMaxHealth()));
+            float healPerTick = (targetMaxHp - 2.0f) / FallenLimb.RETURN_DURATION;
+            if (realPlayer.getHealth() < targetMaxHp) {
+                realPlayer.setHealth(Math.min(targetMaxHp, realPlayer.getHealth() + healPerTick));
             }
 
             if (allHome) {
-                finishRegeneration(player);
+                finishRegeneration(player, targetMaxHp);
             }
         }
 
-        private static void finishRegeneration(Player player) {
+        private static void finishRegeneration(Player player, float targetMaxHp) {
             STATE.regenerating = false;
             STATE.isDown = false;
             STATE.isImmobilized = false;
             STATE.partsLost = 0;
             STATE.healthLostAccumulated = 0.0f;
             STATE.fallenLimbs.clear();
-            resolveAuthoritative(player).setHealth(STATE.originalMaxHealth);
+            Player authPlayer = resolveAuthoritative(player);
+            authPlayer.setHealth(targetMaxHp);
+            player.setHealth(targetMaxHp);
             player.setPose(Pose.STANDING);
+            if (authPlayer.getId() != player.getId()) {
+                authPlayer.setPose(Pose.STANDING);
+            }
             clearMovementPenalty(player);
+            clearMovementPenalty(authPlayer);
             player.displayClientMessage(Component.literal("§a[Rick Prime] ¡Te has regenerado al 100%!"), true);
         }
     }
 
     @Mod.EventBusSubscriber(modid = MODID, value = Dist.CLIENT)
     public static class PlayerModelHider {
-
-        private static final List<RenderLayer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>>> removedItemLayers = new ArrayList<>();
-        private static Field layersField;
-
-        @SuppressWarnings("unchecked")
-        private static List<RenderLayer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>>> getLayersList(
-                LivingEntityRenderer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>> renderer) {
-            try {
-                if (layersField == null) {
-                    for (Field f : LivingEntityRenderer.class.getDeclaredFields()) {
-                        if (List.class.isAssignableFrom(f.getType())) {
-                            f.setAccessible(true);
-                            layersField = f;
-                            break;
-                        }
-                    }
-                }
-                if (layersField != null) {
-                    return (List<RenderLayer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>>>) layersField.get(renderer);
-                }
-            } catch (Exception ignored) {
-            }
-            return null;
-        }
 
         @SubscribeEvent
         public static void onRenderPlayerPre(RenderPlayerEvent.Pre event) {
@@ -1371,32 +1393,12 @@ public class RickPrimeMod {
                 playerModel.leftArm.visible = false;
                 playerModel.leftSleeve.visible = false;
             }
-
-            if (rightArmOut || leftArmOut) {
-                List<RenderLayer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>>> layers = getLayersList(event.getRenderer());
-                if (layers != null && removedItemLayers.isEmpty()) {
-                    for (RenderLayer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>> layer : layers) {
-                        if (layer instanceof ItemInHandLayer) {
-                            removedItemLayers.add(layer);
-                        }
-                    }
-                    layers.removeAll(removedItemLayers);
-                }
-            }
         }
 
         @SubscribeEvent
         public static void onRenderPlayerPost(RenderPlayerEvent.Post event) {
             Player localPlayer = Minecraft.getInstance().player;
             if (localPlayer == null || event.getEntity().getId() != localPlayer.getId()) return;
-
-            if (!removedItemLayers.isEmpty()) {
-                List<RenderLayer<AbstractClientPlayer, PlayerModel<AbstractClientPlayer>>> layers = getLayersList(event.getRenderer());
-                if (layers != null) {
-                    layers.addAll(removedItemLayers);
-                }
-                removedItemLayers.clear();
-            }
 
             PlayerModel<AbstractClientPlayer> playerModel = event.getRenderer().getModel();
             playerModel.rightLeg.visible = true;
@@ -1459,19 +1461,19 @@ public class RickPrimeMod {
                 for (PrimeDrone drone : STATE.activeDrones) {
                     renderDrone(drone, poseStack, bufferSource, camPos);
                 }
-                bufferSource.endBatch(RenderType.translucent());
+                bufferSource.endBatch(RenderType.entityTranslucent(DEFAULT_STEVE_SKIN));
             }
 
             if (!STATE.activeBeams.isEmpty()) {
                 for (RedBeamEffect beam : STATE.activeBeams) {
                     renderRedBeam(beam, poseStack, bufferSource, camPos);
                 }
-                bufferSource.endBatch(RenderType.translucent());
+                bufferSource.endBatch(RenderType.entityTranslucent(DEFAULT_STEVE_SKIN));
             }
 
             if (player != null && STATE.orangeShieldCooldownTicks > 0) {
                 renderOrangeCircularShield(player, poseStack, bufferSource, camPos, event.getPartialTick());
-                bufferSource.endBatch(RenderType.translucent());
+                bufferSource.endBatch(RenderType.entityTranslucent(DEFAULT_STEVE_SKIN));
             }
         }
 
@@ -1534,7 +1536,7 @@ public class RickPrimeMod {
             poseStack.mulPose(Axis.XP.rotationDegrees(pitch));
 
             Matrix4f mat = poseStack.last().pose();
-            VertexConsumer consumer = bufferSource.getBuffer(RenderType.translucent());
+            VertexConsumer consumer = bufferSource.getBuffer(RenderType.entityTranslucent(DEFAULT_STEVE_SKIN));
             float halfW = 0.065f;
             float len = (float) length;
 
@@ -1551,7 +1553,7 @@ public class RickPrimeMod {
             poseStack.scale(DRONE_UNIFORM_SCALE, DRONE_UNIFORM_SCALE, DRONE_UNIFORM_SCALE);
 
             Matrix4f mat = poseStack.last().pose();
-            VertexConsumer consumer = bufferSource.getBuffer(RenderType.translucent());
+            VertexConsumer consumer = bufferSource.getBuffer(RenderType.entityTranslucent(DEFAULT_STEVE_SKIN));
 
             float pulse = 0.88f + 0.12f * (float) Math.sin(drone.ageTicks * 0.35f);
 
@@ -1639,7 +1641,7 @@ public class RickPrimeMod {
             poseStack.mulPose(Axis.YP.rotationDegrees((player.tickCount + partialTick) * 3.0f));
 
             Matrix4f mat = poseStack.last().pose();
-            VertexConsumer consumer = bufferSource.getBuffer(RenderType.translucent());
+            VertexConsumer consumer = bufferSource.getBuffer(RenderType.entityTranslucent(DEFAULT_STEVE_SKIN));
 
             for (int i = 0; i < stacks; i++) {
                 double phi1 = Math.PI * ((double) i / stacks);
