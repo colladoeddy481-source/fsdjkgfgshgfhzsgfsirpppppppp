@@ -37,6 +37,7 @@ import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.food.FoodData;
@@ -84,16 +85,20 @@ public class RickPrimeMod {
     public static final String MODID = "rickprime";
 
     private static final ResourceLocation DEFAULT_STEVE_SKIN = new ResourceLocation("textures/entity/steve.png");
+    // Textura en: src/main/resources/assets/rickprime/textures/entity/rick_prime.png
+    private static final ResourceLocation RICK_PRIME_SKIN = new ResourceLocation(MODID, "textures/entity/rick_prime.png");
 
     private static final int MAX_DRONES = 10;
-    private static final int DRONES_PER_SUMMON = 3;
-    private static final int DRONE_COOLDOWN_TICKS = 15 * 20;
-    private static final int DRONE_LIFETIME_TICKS = 12 * 20;
+    private static final int DRONES_PER_SUMMON = 1;
+    private static final int DRONE_COOLDOWN_TICKS = 10 * 20;
+    private static final int DRONE_IDLE_TIMEOUT_TICKS = 2 * 60 * 20;
     private static final float DRONE_UNIFORM_SCALE = 1.0f;
 
     private static final int RED_BEAM_CHARGE_TICKS = 60 * 20;
     private static final int RED_BEAM_VISUAL_TICKS = 8;
     private static final double RED_BEAM_MAX_RANGE = 32.0;
+
+    private static final int AFTERIMAGE_MAX_AGE = 14;
 
     public RickPrimeMod() {
     }
@@ -138,6 +143,7 @@ public class RickPrimeMod {
         float yaw;
         final float orbitAngle;
         int ageTicks = 0;
+        int ticksWithoutEnemy = 0;
         int attackCooldown = 0;
 
         PrimeDrone(Vec3 pos, float yaw, float orbitAngle) {
@@ -158,6 +164,17 @@ public class RickPrimeMod {
         }
     }
 
+    private static class EvasionAfterimage {
+        final Vec3 pos;
+        final float yaw;
+        int age = 0;
+
+        EvasionAfterimage(Vec3 pos, float yaw) {
+            this.pos = pos;
+            this.yaw = yaw;
+        }
+    }
+
     private static class BodyState {
         int partsLost = 0;
         float healthLostAccumulated = 0.0f;
@@ -170,6 +187,7 @@ public class RickPrimeMod {
         final List<FallenLimb> fallenLimbs = new ArrayList<>();
         final List<PrimeDrone> activeDrones = new ArrayList<>();
         final List<RedBeamEffect> activeBeams = new ArrayList<>();
+        final List<EvasionAfterimage> afterimages = new ArrayList<>();
 
         int droneCooldownTicksLeft = 0;
         int redBeamChargeTicks = 0;
@@ -344,12 +362,50 @@ public class RickPrimeMod {
             return DEFAULT_STEVE_SKIN;
         }
 
+        private static ResourceLocation resolveRickPrimeSkin(Player fallbackPlayer) {
+            var resourceOpt = Minecraft.getInstance().getResourceManager().getResource(RICK_PRIME_SKIN);
+            if (resourceOpt.isPresent()) {
+                return RICK_PRIME_SKIN;
+            }
+            return resolvePlayerSkin(fallbackPlayer);
+        }
+
         private static void refreshFallenLimbSkins(Player player) {
             ResourceLocation skin = resolvePlayerSkin(player);
             for (FallenLimb limb : STATE.fallenLimbs) {
                 if (limb.skin == null || limb.skin.equals(DEFAULT_STEVE_SKIN)) {
                     limb.skin = skin;
                 }
+            }
+        }
+
+        private static boolean isHostileTarget(LivingEntity entity, Player player) {
+            if (entity == null || !entity.isAlive() || entity.getId() == player.getId() || entity instanceof Player) {
+                return false;
+            }
+            if (entity instanceof Enemy) return true;
+            if (entity instanceof Mob mob) {
+                LivingEntity target = mob.getTarget();
+                return target != null && target.getId() == player.getId();
+            }
+            return false;
+        }
+
+        private static void spawnAfterimage(Vec3 pos, float yaw) {
+            if (STATE.afterimages.size() >= 8) {
+                STATE.afterimages.remove(0);
+            }
+            STATE.afterimages.add(new EvasionAfterimage(pos, yaw));
+        }
+
+        private static void updateEvasionAfterimages(Player clientPlayer) {
+            STATE.afterimages.removeIf(img -> {
+                img.age++;
+                return img.age >= AFTERIMAGE_MAX_AGE;
+            });
+
+            if (STATE.evasionActive && clientPlayer.getDeltaMovement().horizontalDistanceSqr() > 0.002 && serverTickCounter % 3 == 0) {
+                spawnAfterimage(clientPlayer.position(), clientPlayer.getYRot());
             }
         }
 
@@ -462,18 +518,17 @@ public class RickPrimeMod {
             if (STATE.droneCooldownTicksLeft > 0) {
                 float secondsLeft = STATE.droneCooldownTicksLeft / 20.0f;
                 clientPlayer.displayClientMessage(Component.literal(
-                        "§e[Rick Prime] Espera " + String.format("%.1f", secondsLeft) + "s para invocar robots."), true);
+                        "§e[Rick Prime] Recargando dron: " + String.format("%.1f", secondsLeft) + "s"), true);
                 return;
             }
 
-            int availableSlots = MAX_DRONES - STATE.activeDrones.size();
-            if (availableSlots <= 0) {
+            if (STATE.activeDrones.size() >= MAX_DRONES) {
                 clientPlayer.displayClientMessage(Component.literal(
-                        "§c[Rick Prime] Ya alcanzaste el límite de " + MAX_DRONES + " robots activos."), true);
+                        "§c[Rick Prime] Límite alcanzado (" + MAX_DRONES + "/" + MAX_DRONES + " drones activos)."), true);
                 return;
             }
 
-            int toSpawn = Math.min(DRONES_PER_SUMMON, availableSlots);
+            int toSpawn = Math.min(DRONES_PER_SUMMON, MAX_DRONES - STATE.activeDrones.size());
             for (int i = 0; i < toSpawn; i++) {
                 float angle = (float) ((Math.PI * 2.0 * (STATE.activeDrones.size() + 1)) / MAX_DRONES);
                 Vec3 spawnPos = clientPlayer.position().add(Math.cos(angle) * 1.6, 1.5, Math.sin(angle) * 1.6);
@@ -483,7 +538,7 @@ public class RickPrimeMod {
 
             STATE.droneCooldownTicksLeft = DRONE_COOLDOWN_TICKS;
             clientPlayer.displayClientMessage(Component.literal(
-                    "§a[Rick Prime] ¡Invocaste " + toSpawn + " robot(s)! (" + STATE.activeDrones.size() + "/" + MAX_DRONES + " activos)"), true);
+                    "§a[Rick Prime] ¡Dron generado! (" + STATE.activeDrones.size() + "/" + MAX_DRONES + " activos)"), true);
         }
 
         private static void updateDrones(Player clientPlayer) {
@@ -493,11 +548,7 @@ public class RickPrimeMod {
             List<LivingEntity> nearbyHostiles = realPlayer.level().getEntitiesOfClass(
                     LivingEntity.class,
                     realPlayer.getBoundingBox().inflate(10.0),
-                    e -> e != null
-                            && e.isAlive()
-                            && e.getId() != realPlayer.getId()
-                            && !(e instanceof Player)
-                            && e instanceof Mob
+                    e -> isHostileTarget(e, realPlayer)
             );
             nearbyHostiles.sort(Comparator.comparingDouble(e -> e.distanceToSqr(realPlayer)));
             LivingEntity nearestTarget = nearbyHostiles.isEmpty() ? null : nearbyHostiles.get(0);
@@ -517,6 +568,7 @@ public class RickPrimeMod {
                 );
 
                 if (nearestTarget != null) {
+                    drone.ticksWithoutEnemy = 0;
                     Vec3 targetPos = nearestTarget.position().add(0.0, nearestTarget.getBbHeight() * 0.65, 0.0);
                     drone.pos = drone.pos.lerp(targetPos, 0.25);
                     double dx = targetPos.x - drone.pos.x;
@@ -529,17 +581,22 @@ public class RickPrimeMod {
                         nearestTarget.hurt(realPlayer.level().damageSources().playerAttack(realPlayer), 4.0f);
                     }
                 } else {
+                    drone.ticksWithoutEnemy++;
                     drone.pos = drone.pos.lerp(desiredPos, 0.25);
                     drone.yaw = clientPlayer.getYRot();
-                }
 
-                if (drone.ageTicks >= DRONE_LIFETIME_TICKS) {
-                    spawnTeleportParticles(clientPlayer, drone.pos.x, drone.pos.y, drone.pos.z);
-                    expired.add(drone);
+                    if (drone.ticksWithoutEnemy >= DRONE_IDLE_TIMEOUT_TICKS) {
+                        spawnTeleportParticles(clientPlayer, drone.pos.x, drone.pos.y, drone.pos.z);
+                        expired.add(drone);
+                    }
                 }
             }
 
-            STATE.activeDrones.removeAll(expired);
+            if (!expired.isEmpty()) {
+                STATE.activeDrones.removeAll(expired);
+                clientPlayer.displayClientMessage(Component.literal(
+                        "§7[Rick Prime] Un dron desapareció tras 2 minutos sin detectar enemigos."), true);
+            }
         }
 
         private static boolean isArrowSource(DamageSource source) {
@@ -983,6 +1040,7 @@ public class RickPrimeMod {
         private static void performEvasionTeleport(Player clientPlayer) {
             Player real = resolveAuthoritative(clientPlayer);
             Vec3 oldPos = real.position();
+            spawnAfterimage(oldPos, real.getYRot());
 
             double angle = real.getRandom().nextDouble() * Math.PI * 2.0;
             double dist = 4.0 + real.getRandom().nextDouble() * 2.0;
@@ -1038,8 +1096,9 @@ public class RickPrimeMod {
                     STATE.evasionActive = true;
                     STATE.evasionActiveTicksLeft = EVASION_DURATION_TICKS;
                     STATE.evasionChargeTicks = 0;
+                    spawnAfterimage(player.position(), player.getYRot());
                     player.displayClientMessage(Component.literal(
-                            "§b[Rick Prime] ¡Evasión activada por 30s! Esquivarás ataques teletransportándote."), true);
+                            "§b[Rick Prime] ¡Evasión activada por 30s!"), true);
                 }
             }
 
@@ -1110,6 +1169,7 @@ public class RickPrimeMod {
             serverTickCounter++;
             refreshFallenLimbSkins(player);
             updateDrones(player);
+            updateEvasionAfterimages(player);
 
             if (STATE.redBeamChargeTicks < RED_BEAM_CHARGE_TICKS) {
                 STATE.redBeamChargeTicks++;
@@ -1308,16 +1368,24 @@ public class RickPrimeMod {
             PoseStack poseStack = event.getPoseStack();
             MultiBufferSource.BufferSource bufferSource = mc.renderBuffers().bufferSource();
 
-            if (!STATE.fallenLimbs.isEmpty()) {
-                if (model == null) {
-                    model = new PlayerModel<>(mc.getEntityModels().bakeLayer(ModelLayers.PLAYER), false);
-                }
+            if (model == null) {
+                model = new PlayerModel<>(mc.getEntityModels().bakeLayer(ModelLayers.PLAYER), false);
+            }
 
+            if (!STATE.fallenLimbs.isEmpty()) {
                 for (FallenLimb limb : STATE.fallenLimbs) {
                     ResourceLocation tex = limb.skin != null ? limb.skin : DEFAULT_STEVE_SKIN;
                     renderLimb(limb, tex, poseStack, bufferSource, camPos);
                     bufferSource.endBatch(RenderType.entityCutoutNoCull(tex));
                 }
+            }
+
+            if (player != null && !STATE.afterimages.isEmpty()) {
+                ResourceLocation primeTex = ForgeClientEvents.resolveRickPrimeSkin(player);
+                for (EvasionAfterimage img : STATE.afterimages) {
+                    renderAfterimage(img, primeTex, poseStack, bufferSource, camPos);
+                }
+                bufferSource.endBatch(RenderType.entityTranslucent(primeTex));
             }
 
             if (player != null && !STATE.activeDrones.isEmpty()) {
@@ -1338,6 +1406,48 @@ public class RickPrimeMod {
                 renderOrangeCircularShield(player, poseStack, bufferSource, camPos, event.getPartialTick());
                 bufferSource.endBatch(RenderType.translucent());
             }
+        }
+
+        private static void renderAfterimage(EvasionAfterimage img, ResourceLocation tex,
+                                             PoseStack poseStack, MultiBufferSource.BufferSource bufferSource,
+                                             Vec3 camPos) {
+            float lifeRatio = Math.max(0.0f, 1.0f - (img.age / (float) AFTERIMAGE_MAX_AGE));
+            float alpha = 0.65f * lifeRatio;
+
+            model.head.xRot = 0; model.head.yRot = 0; model.head.zRot = 0;
+            model.body.xRot = 0; model.body.yRot = 0; model.body.zRot = 0;
+            model.rightArm.xRot = -0.7f; model.rightArm.yRot = 0; model.rightArm.zRot = 0;
+            model.leftArm.xRot = 0.7f;   model.leftArm.yRot = 0; model.leftArm.zRot = 0;
+            model.rightLeg.xRot = 0.6f;  model.rightLeg.yRot = 0; model.rightLeg.zRot = 0;
+            model.leftLeg.xRot = -0.6f;  model.leftLeg.yRot = 0; model.leftLeg.zRot = 0;
+
+            model.head.visible = true;
+            model.hat.visible = true;
+            model.body.visible = true;
+            model.jacket.visible = true;
+            model.rightArm.visible = true;
+            model.leftArm.visible = true;
+            model.rightLeg.visible = true;
+            model.leftLeg.visible = true;
+            model.rightSleeve.visible = true;
+            model.leftSleeve.visible = true;
+            model.rightPants.visible = true;
+            model.leftPants.visible = true;
+
+            poseStack.pushPose();
+            poseStack.translate(img.pos.x - camPos.x, img.pos.y - camPos.y, img.pos.z - camPos.z);
+            poseStack.mulPose(Axis.YP.rotationDegrees(img.yaw));
+            poseStack.scale(-1.0f, -1.0f, 1.0f);
+            poseStack.translate(0, -1.5, 0);
+
+            var buffer = bufferSource.getBuffer(RenderType.entityTranslucent(tex));
+            int argb = ((int) (alpha * 255.0f) << 24) | 0x45D5FF;
+            float r = ((argb >> 16) & 0xFF) / 255.0f;
+            float g = ((argb >> 8) & 0xFF) / 255.0f;
+            float b = (argb & 0xFF) / 255.0f;
+            model.renderToBuffer(poseStack, buffer, 15728880, OverlayTexture.NO_OVERLAY, r, g, b, alpha);
+
+            poseStack.popPose();
         }
 
         private static void renderRedBeam(RedBeamEffect beam, PoseStack poseStack,
