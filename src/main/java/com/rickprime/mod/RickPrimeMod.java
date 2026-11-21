@@ -271,9 +271,9 @@ public class RickPrimeMod {
     private static void renderHudBars(GuiGraphics guiGraphics, int width, int height) {
         int barWidth = 100;
         int barHeight = 4;
-        int x = width - barWidth - 12;
+        int x = width - barWidth - 8;
 
-        int beamY = height - 36;
+        int beamY = height - 26;
         float beamPct = Math.max(0f, Math.min(1f, STATE.redBeamChargeTicks / (float) RED_BEAM_CHARGE_TICKS));
         boolean beamReady = STATE.redBeamChargeTicks >= RED_BEAM_CHARGE_TICKS;
         int beamColor = beamReady ? 0xFFFF2222 : 0xFF991111;
@@ -284,7 +284,7 @@ public class RickPrimeMod {
             guiGraphics.fill(x, beamY, x + beamFilled, beamY + barHeight, beamColor);
         }
 
-        int droneY = height - 28;
+        int droneY = height - 18;
         float droneReadyPct;
         int droneColor;
         if (STATE.droneCooldownTicksLeft > 0) {
@@ -302,7 +302,7 @@ public class RickPrimeMod {
             guiGraphics.fill(x, droneY, x + droneFilled, droneY + barHeight, droneColor);
         }
 
-        int evasionY = height - 20;
+        int evasionY = height - 10;
         float evasionPct;
         int evasionColor;
         if (STATE.evasionActive) {
